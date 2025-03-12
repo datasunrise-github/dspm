@@ -47,6 +47,16 @@ variable "key_name" {
   type        = string
 }
 
+variable "allow_access_for_aws_account_ids" {
+  type        = list(string)
+  default     = []
+}
+
+variable "allow_access_for_azure_account_ids" {
+  type        = list(string)
+  default     = []
+}
+
 variable "url_rds_certificate" {
   type        = string
   default     = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"

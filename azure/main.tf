@@ -131,13 +131,17 @@ locals {
 
 echo '{
   "UrlToBuild": "",
+  "AliasKeyNames": {},
   "Subnets": [
     "${azurerm_subnet.default_subnet.id}"
+  ],
+  "SecurityGroups": [
+    "${azurerm_network_security_group.network_security_group.id}"
   ],
   "FullEncryptionProtocol": false,
   "OnlyOneRegion": false,
   "MaxThreadUpdateMetadata": 25,
-  "SessionTimout": 100,
+  "SessionTimeout": 100,
   "Logs": {
     "OTHER": false,
     "ERROR": true,

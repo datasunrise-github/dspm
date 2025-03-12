@@ -1,3 +1,6 @@
+locals {
+  is_linux = length(regexall("/home/", lower(abspath(path.root)))) > 0
+}
 data "aws_caller_identity" "current" {}
 
 data "aws_availability_zones" "available" {
@@ -208,18 +211,23 @@ wget -O /home/ec2-user/dsssm/certs/rds.crt "${var.url_rds_certificate}"
 
 echo "{
    \"UrlToBuild\": \"\",
-   \"AccountIDs\": [${data.aws_caller_identity.current.account_id}],
+   \"AccountIDs\": [${length(var.allow_access_for_aws_account_ids) == 0 ? format("\\\"%s\\\"", data.aws_caller_identity.current.account_id) : join(",", formatlist("\\\"%s\\\"", var.allow_access_for_aws_account_ids))}],
+   \"TenantIDs\": [${join(",", formatlist("\\\"%s\\\"", var.allow_access_for_azure_account_ids))}],
    \"TerraformCache\": {
      \"BucketName\": \"${var.s3_bucket_name}\",
      \"Region\": \"${var.s3_bucket_region}\"
    },
+   \"AliasKeyNames\": {},
    \"Subnets\": [
      \"${aws_subnet.subnet_ec2.id}\"
+   ],
+   \"SecurityGroups\": [
+     \"${aws_security_group.ec2.id}\"
    ],
    \"FullEncryptionProtocol\": false,
    \"OnlyOneRegion\": false,
    \"MaxThreadUpdateMetadata\": 25,
-   \"SessionTimout\": 100,
+   \"SessionTimeout\": 100,
    \"Region\": \"$REGION\",
    \"Logs\": {
      \"OTHER\": false,
@@ -472,11 +480,12 @@ resource "null_resource" "deletion" {
   triggers = {
     name          = "${var.prefix_name}-Ds3mInstance"
     region        = var.region
+    prefix        = local.is_linux ? "./" : ""
   }
   provisioner "local-exec" {
     when        = destroy
     on_failure  = fail
-    command     = "timeout 180m ./exec_aws_command_to_ec2.sh ${self.triggers.name} ${self.triggers.region}"
+    command     = "${self.triggers.prefix}exec_aws_command_to_ec2.sh ${self.triggers.name} ${self.triggers.region}"
   }
   depends_on = [
     aws_vpc.main,

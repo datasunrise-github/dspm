@@ -228,6 +228,7 @@ echo "{
    \"OnlyOneRegion\": false,
    \"MaxThreadUpdateMetadata\": 25,
    \"SessionTimeout\": 100,
+   \"IgnoreMaskTypeCheck\": true,
    \"Region\": \"$REGION\",
    \"Logs\": {
      \"OTHER\": false,

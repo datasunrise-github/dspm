@@ -142,6 +142,7 @@ echo '{
   "OnlyOneRegion": false,
   "MaxThreadUpdateMetadata": 25,
   "SessionTimeout": 100,
+  "IgnoreMaskTypeCheck": true,
   "Logs": {
     "OTHER": false,
     "ERROR": true,

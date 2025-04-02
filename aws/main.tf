@@ -1,6 +1,14 @@
 locals {
   is_linux = length(regexall("/home/", lower(abspath(path.root)))) > 0
 }
+
+locals {
+  search_ami = {
+    "dev" = "MR-*-DataSunrise-Data-Security-Posture-Management-*",
+    "rc" = "RC-*-DataSunrise-Data-Security-Posture-Management-*",
+    "release" = "DataSunrise-Data-Security-Posture-Management*"
+  }
+}
 data "aws_caller_identity" "current" {}
 
 data "aws_availability_zones" "available" {
@@ -13,7 +21,9 @@ data "aws_ami" "latest" {
 
   filter {
     name   = "name"
-    values = ["*DataSunrise-Data-Security-Posture-Management*"]
+    values = [
+      local.search_ami[var.image_type]
+    ]
   }
 }
 
@@ -522,5 +532,5 @@ output "web_console" {
 }
 
 output "ami" {
-  value = data.aws_ami.latest.id
+  value = "${data.aws_ami.latest.name} (${data.aws_ami.latest.id})"
 }

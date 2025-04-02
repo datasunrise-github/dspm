@@ -12,6 +12,15 @@ variable "secret_key" {
   sensitive   = true
 }
 
+variable "image_type" {
+  type = string
+  default = "release"
+  validation {
+    condition     = contains(["dev", "rc", "release"], var.image_type)
+    error_message = "Valid values for 'image_type': dev, rc, release"
+  }
+}
+
 variable "s3_bucket_name" {
   type    = string
 }
@@ -206,4 +215,9 @@ EOT
 variable "path_to_private_key_for_update_build" {
   type    = string
   default = ""
+}
+
+variable "vpc_cidr_block" {
+  type = string
+  default = "10.0.0.0/16"
 }

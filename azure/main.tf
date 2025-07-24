@@ -181,33 +181,32 @@ echo '${var.encryption_public_key}' > /etc/dsssm/dsssm/src/helpers/encryption/pu
 cd /etc/dsssm/dsssm && npm install && npm run start-database-migration
 
 echo '[Unit]
- Description=/etc/rc.local Compatibility
- ConditionPathExists=/etc/rc.local
+Description=DSPM (Data Security Posture Management) Service
+After=network.target
 
 [Service]
- Type=forking
- ExecStart=/etc/rc.local start
- TimeoutSec=0
- StandardOutput=tty
- RemainAfterExit=yes
- SysVStartPriority=99
+Type=simple
+User=root
+WorkingDirectory=/etc/dsssm/dsssm
+Environment="UV_USE_IO_URING=0"
+ExecStart=/usr/bin/npm run start-http-server
+ExecStop=/usr/bin/pkill -f "node.*start-http-server"
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/etc/dsssm/dsssm/logs/dsssm.txt
+StandardError=append:/etc/dsssm/dsssm/logs/dsssm.txt
 
 [Install]
- WantedBy=multi-user.target
-' > /etc/systemd/system/rc-local.service
+WantedBy=multi-user.target
+' > /etc/systemd/system/dspm.service
 
-echo '#!/bin/bash
-cd /etc/dsssm/dsssm && npm run start-http-server >> /etc/dsssm/dsssm/logs/dsssm.txt
-exit 0
-' > /etc/rc.local
+sudo systemctl daemon-reload
 
-sudo chmod +x /etc/rc.local
+sudo systemctl enable dspm.service
 
-sudo systemctl enable rc-local
+sudo systemctl start dspm.service
 
-sudo systemctl start rc-local.service
-
-sudo systemctl status rc-local.service
+sudo systemctl status dspm.service
 
 EOT
 }

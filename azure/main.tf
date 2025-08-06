@@ -144,6 +144,8 @@ echo '{
   "SessionTimeout": 100,
   "IgnoreMaskTypeCheck": true,
   "Logs": {
+    "UPDATE_METADATA": true,
+    "RPC": true,
     "OTHER": false,
     "ERROR": true,
     "API_REQUEST": false,

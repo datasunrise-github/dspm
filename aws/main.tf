@@ -753,6 +753,8 @@ echo "{
    \"IgnoreMaskTypeCheck\": true,
    \"Region\": \"$REGION\",
    \"Logs\": {
+     \"RPC\": true,
+     \"UPDATE_METADATA\": true,
      \"OTHER\": false,
      \"ERROR\": true,
      \"API_REQUEST\": false,

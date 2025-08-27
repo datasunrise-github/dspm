@@ -65,6 +65,7 @@ resource "aws_s3_bucket" "terraform_cache_auto" {
 }
 
 resource "null_resource" "s3" {
+  count  = var.s3_bucket_name == "" ? 1 : 0
   triggers = {
     name            = local.auto_bucket_name
   }
@@ -151,7 +152,7 @@ resource "aws_internet_gateway" "ig" {
 }
 
 resource "aws_eip" "nat_eip" {
-  vpc        = true
+  domain     = "vpc"
   depends_on = [
     aws_vpc.main,
     aws_internet_gateway.ig

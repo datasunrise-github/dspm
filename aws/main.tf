@@ -918,6 +918,14 @@ then
   INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
   DS_HOST_PRIVIP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
 
+  while [[ $DS_HOST_PRIVIP == "" ]]; do
+    echo "." >> /opt/datasunrise/logs/start.log
+    sleep 5
+    TOKEN=`curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+    INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
+    DS_HOST_PRIVIP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
+  done
+
   echo "Configuration..."
   sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type "postgresql" --dictionary-host ${element(split(":", aws_db_instance.postgres.endpoint), 0)} --dictionary-port 5432 --dictionary-database "postgres" --dictionary-schema "public" --dictionary-login "postgres" ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dsssm-$INSTID-${var.prefix_name} --server-host "$DS_HOST_PRIVIP" --server-port 11000  --server-use-https 1 --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
   PASS=`aws secretsmanager get-secret-value --secret-id ${aws_secretsmanager_secret.ds_secret.id} | jq --raw-output ".SecretString" | jq --raw-output ".password"` >> /opt/datasunrise/logs/start.log
@@ -991,86 +999,99 @@ resource "aws_iam_role" "iam_role" {
       }
     ]
   })
-  inline_policy {
-    name = "${var.prefix_name}-access-to-put-logs-by-aws-service"
-    policy = jsonencode({
-      Version = "2012-10-17"
-      Statement = [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "s3:ListMultipartUploadParts",
-            "s3:PutObject",
-            "s3:AbortMultipartUpload"
-          ],
-          "Resource": "arn:aws:s3:::*"
-        }
-      ]
-    })
-  }
-  inline_policy {
-    name = "${var.prefix_name}-access-to-read-logs-by-aws-service"
-    policy = jsonencode({
-      Version = "2012-10-17"
-      Statement = [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "s3:GetBucketLocation",
-            "s3:GetBucketACL",
-            "s3:ListBucket"
-          ],
-          "Resource": "arn:aws:s3:::*"
-        }
-      ]
-    })
-  }
-  inline_policy {
-    name = "${var.prefix_name}-access-to-read-files-by-aws-DS"
-    policy = jsonencode({
-      Version = "2012-10-17"
-      Statement = [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "s3:ListAllMyBuckets",
-            "s3:GetObject",
-            "s3:HeadObject",
-            "s3:ListObjectsV2",
-            "s3:ListObjects"
-          ],
-          "Resource": "arn:aws:s3:::*"
-        }
-      ]
-    })
-  }
-  inline_policy {
-    name = "${var.prefix_name}-datasunrise-instance-policy"
-    policy = jsonencode({
-      Version = "2012-10-17"
-      Statement = [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "rds:DownloadCompleteDBLogFile",
-            "rds:DownloadDBLogFilePortion",
-            "rds:DescribeDBClusters",
-            "rds:DescribeDBInstances",
-            "rds:DescribeDBLogFiles"
-          ],
-          "Resource": "arn:aws:rds:*"
-        },
-        {
-          "Effect": "Allow",
-          "Action": [
-            "secretsmanager:DescribeSecret",
-            "secretsmanager:GetSecretValue"
-          ],
-          "Resource": "arn:aws:secretsmanager:*"
-        }
-      ]
-    })
-  }
+}
+
+# Separate IAM role policies to replace deprecated inline_policy
+resource "aws_iam_role_policy" "access_to_put_logs" {
+  name = "${var.prefix_name}-access-to-put-logs-by-aws-service"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListMultipartUploadParts",
+          "s3:PutObject",
+          "s3:AbortMultipartUpload"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "access_to_read_logs" {
+  name = "${var.prefix_name}-access-to-read-logs-by-aws-service"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetBucketLocation",
+          "s3:GetBucketACL",
+          "s3:ListBucket"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "access_to_read_files" {
+  name = "${var.prefix_name}-access-to-read-files-by-aws-DS"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListAllMyBuckets",
+          "s3:GetObject",
+          "s3:HeadObject",
+          "s3:ListObjectsV2",
+          "s3:ListObjects"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "datasunrise_instance_policy" {
+  name = "${var.prefix_name}-datasunrise-instance-policy"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "rds:DownloadCompleteDBLogFile",
+          "rds:DownloadDBLogFilePortion",
+          "rds:DescribeDBClusters",
+          "rds:DescribeDBInstances",
+          "rds:DescribeDBLogFiles"
+        ],
+        "Resource": "arn:aws:rds:*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:GetSecretValue"
+        ],
+        "Resource": "arn:aws:secretsmanager:*"
+      }
+    ]
+  })
 }
 
 resource "aws_iam_instance_profile" "iam_role_profile" {

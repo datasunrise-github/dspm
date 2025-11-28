@@ -20,9 +20,9 @@ data "aws_ami" "dspm" {
   owners      = ["042001279082"]
 
   filter {
-    name   = "name"
+    name   = var.ami_id == "" ? "name" : "image-id"
     values = [
-      local.search_ami[var.image_type]
+      var.ami_id == "" ? local.search_ami[var.image_type] : var.ami_id
     ]
   }
 }
@@ -879,8 +879,15 @@ locals {
 #!/bin/bash
 
 echo "Installation..."
-yum install jq -y
-yum install /opt/cooked/installer.rpm -y
+yum install jq -y \
+  --setopt=timeout=10 \
+  --setopt=retries=2 \
+  --disablerepo='*' \
+  --enablerepo=amazonlinux
+yum install /opt/cooked/installer.rpm -y \
+  --setopt=timeout=10 \
+  --setopt=retries=2 \
+  --disablerepo='*'
 CUSTOM_CONFIG_DS=""
 if [[ $CUSTOM_CONFIG_DS != "" ]]
 then
@@ -914,6 +921,17 @@ systemctl stop datasunrise.service
 if [[ $1 == "start" ]]
 then
   export AF_HOME=/opt/datasunrise/
+
+  DICT_HOST="${element(split(":", aws_db_instance.postgres.endpoint), 0)}"
+  DICT_PORT=5432
+
+  while true; do
+    timeout 1 bash -c "echo > /dev/tcp/$DICT_HOST/$DICT_PORT" 2>/dev/null && break
+    echo "Waiting for $DICT_HOST:$DICT_PORT"
+    sleep 1
+  done
+  echo "$DICT_HOST:$DICT_PORT is now available"
+
   TOKEN=`curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
   INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
   DS_HOST_PRIVIP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`

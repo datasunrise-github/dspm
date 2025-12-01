@@ -1,5 +1,5 @@
 ---
-title: How to Deploy DataSunrise DSPM: Step-by-Step Setup
+title: "How to Deploy DataSunrise DSPM: Step-by-Step Setup"
 description: 
 published: 1
 date: 2025-09-16T15:27:26.010Z

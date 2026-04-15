@@ -1,16 +1,11 @@
 ---
-title: How to Deploy DataSunrise DSPM: Step-by-Step Setup
-description: 
 published: 1
-date: 2025-09-16T15:27:26.010Z
+date: 2025-12-02T08:02:09.921Z
 editor: markdown
-dateCreated: 2025-09-16T14:32:58.462Z
+dateCreated: 2025-10-29T14:33:51.464Z
 ---
 
-
 # How to Deploy DataSunrise DSPM: Step-by-Step Setup
-
-
 
 ## What is DataSunrise DSPM?
 
@@ -120,5 +115,3 @@ terraform apply ./metadata/main.tfplan
 **DataSunrise DSPM** is a universal tool for database security in AWS. It automates asset discovery and protection, simplifies data audit, and helps organizations stay compliant with security standards.
 
 If you want to reliably protect data in AWS and simplify administration, **DSPM** is your best choice.
-
-[ds_cta]

@@ -301,6 +301,60 @@ resource "azurerm_private_dns_zone_virtual_network_link" "private_dns_zone_virtu
   ]
 }
 
+resource "tls_private_key" "encryption_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "tls_private_key" "https_key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "tls_self_signed_cert" "https_cert" {
+  private_key_pem = tls_private_key.https_key.private_key_pem
+
+  subject {
+    common_name  = "localhost"
+    organization = "DataSunrise"
+  }
+
+  validity_period_hours = 8760 
+
+  allowed_uses = [
+    "key_encipherment",
+    "digital_signature",
+    "server_auth",
+  ]
+}
+resource "azurerm_key_vault_secret" "enc_private" {
+  name         = "${local.name}-enc-private"
+  value        = tls_private_key.encryption_key.private_key_pem
+  key_vault_id = azurerm_key_vault.vault.id
+  depends_on   = [azurerm_role_assignment.admin] # Важно: Terraform должен иметь права на запись
+}
+
+resource "azurerm_key_vault_secret" "enc_public" {
+  name         = "${local.name}-enc-public"
+  value        = tls_private_key.encryption_key.public_key_pem
+  key_vault_id = azurerm_key_vault.vault.id
+  depends_on   = [azurerm_role_assignment.admin]
+}
+
+resource "azurerm_key_vault_secret" "https_key" {
+  name         = "${local.name}-https-key"
+  value        = tls_private_key.https_key.private_key_pem
+  key_vault_id = azurerm_key_vault.vault.id
+  depends_on   = [azurerm_role_assignment.admin]
+}
+
+resource "azurerm_key_vault_secret" "https_cert" {
+  name         = "${local.name}-https-cert"
+  value        = tls_self_signed_cert.https_cert.cert_pem
+  key_vault_id = azurerm_key_vault.vault.id
+  depends_on   = [azurerm_role_assignment.admin]
+}
+
 resource "azurerm_postgresql_flexible_server" "postgres" {
   name                          = local.name
   resource_group_name           = local.name
@@ -431,14 +485,23 @@ echo '{
     }
   }
 }' > /home/${var.username}/dsssm/config/config.json
+az login --identity --username "${azurerm_user_assigned_identity.identity.client_id}"
 
-echo '${var.http_server_key}' > /home/${var.username}/dsssm/certs/server.key
+VAULT_NAME="${azurerm_key_vault.vault.name}"
 
-echo '${var.http_server_crt}' > /home/${var.username}/dsssm/certs/server.crt
+mkdir -p /home/${var.username}/dsssm/src/helpers/encryption/
+mkdir -p /home/${var.username}/dsssm/certs/
 
-echo '${var.encryption_private_key}' > /home/${var.username}/dsssm/src/helpers/encryption/private.pem
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_private.name}" --query value -o tsv > /home/${var.username}/dsssm/src/helpers/encryption/private.pem
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_public.name}" --query value -o tsv > /home/${var.username}/dsssm/src/helpers/encryption/public.pem
 
-echo '${var.encryption_public_key}' > /home/${var.username}/dsssm/src/helpers/encryption/public.pem
+echo "Loading HTTPS certificates from Key Vault..."
+
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_key.name}" --query value -o tsv > /home/${var.username}/dsssm/certs/server.key
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_cert.name}" --query value -o tsv > /home/${var.username}/dsssm/certs/server.crt
+
+chown -R ${var.username}:${var.username} /home/${var.username}/dsssm/src/helpers/encryption/
+chown -R ${var.username}:${var.username} /home/${var.username}/dsssm/certs/
 
 cd /home/${var.username}/dsssm && npm install && npm run start-database-migration
 
@@ -489,6 +552,7 @@ resource "azapi_resource" "vm" {
       type = "UserAssigned"
       userAssignedIdentities = {
         "${azurerm_user_assigned_identity.dspm.id}" = {}
+        "${azurerm_user_assigned_identity.identity.id}" = {}
       }
     }
 

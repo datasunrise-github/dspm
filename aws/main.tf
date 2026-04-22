@@ -72,7 +72,7 @@ resource "null_resource" "s3" {
   provisioner "local-exec" {
     when        = destroy
     on_failure  = fail
-    command     = "aws s3 rm s3://${self.triggers.name}/dsssm/"
+    command     = "aws s3 rm s3://${self.triggers.name}/dspm/"
   }
 
   depends_on = [
@@ -107,7 +107,7 @@ resource "aws_vpc" "main" {
   enable_dns_support = true
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mVpc"
+    Name = "${var.prefix_name}-DspmVpc"
   }
 }
 
@@ -118,7 +118,7 @@ resource "aws_subnet" "subnet_ec2" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mSubnetEc2"
+    Name = "${var.prefix_name}-DspmSubnetEc2"
   }
 
   depends_on = [
@@ -134,7 +134,7 @@ resource "aws_subnet" "subnet_db" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mSubnet-${data.aws_availability_zones.available.names[count.index]}"
+    Name = "${var.prefix_name}-DspmSubnet-${data.aws_availability_zones.available.names[count.index]}"
   }
   depends_on = [
     aws_vpc.main
@@ -144,7 +144,7 @@ resource "aws_subnet" "subnet_db" {
 resource "aws_internet_gateway" "ig" {
   vpc_id = aws_vpc.main.id
   tags = {
-    Name = "${var.prefix_name}-Ds3mNetGw"
+    Name = "${var.prefix_name}-DspmNetGw"
   }
   depends_on = [
     aws_vpc.main
@@ -164,7 +164,7 @@ resource "aws_nat_gateway" "nat" {
   subnet_id     = aws_subnet.subnet_ec2.id
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mNat"
+    Name = "${var.prefix_name}-DspmNat"
   }
 
   depends_on    = [
@@ -177,7 +177,7 @@ resource "aws_nat_gateway" "nat" {
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
   tags = {
-    Name = "${var.prefix_name}-Ds3mRt"
+    Name = "${var.prefix_name}-DspmRt"
   }
   depends_on = [
     aws_vpc.main
@@ -208,12 +208,12 @@ resource "aws_route_table_association" "ec2" {
 }
 
 resource "aws_security_group" "ec2" {
-  name        = "${var.prefix_name}-Ds3mEc2Sg"
+  name        = "${var.prefix_name}-DspmEc2Sg"
   description = "Allow8080and22"
   vpc_id      = aws_vpc.main.id
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mEc2Sg"
+    Name = "${var.prefix_name}-DspmEc2Sg"
   }
 
   depends_on = [
@@ -222,12 +222,12 @@ resource "aws_security_group" "ec2" {
 }
 
 resource "aws_security_group" "db" {
-  name        = "${var.prefix_name}-Ds3mDbSg"
+  name        = "${var.prefix_name}-DspmDbSg"
   description = "Allow5432"
   vpc_id      = aws_vpc.main.id
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mDbSg"
+    Name = "${var.prefix_name}-DspmDbSg"
   }
   depends_on = [
     aws_vpc.main
@@ -235,12 +235,12 @@ resource "aws_security_group" "db" {
 }
 
 resource "aws_security_group" "ds" {
-  name        = "${var.prefix_name}-Ds3mDsSg"
+  name        = "${var.prefix_name}-DspmDsSg"
   description = "Allow11000"
   vpc_id      = aws_vpc.main.id
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mDsSg"
+    Name = "${var.prefix_name}-DspmDsSg"
   }
   depends_on = [
     aws_vpc.main
@@ -593,11 +593,11 @@ resource "aws_vpc_security_group_egress_rule" "response_from_ds_by_ssh" {
 
 
 resource "aws_db_subnet_group" "db_subnet_group" {
-  name       = "${var.prefix_name}-ds3m-subnet-group"
+  name       = "${var.prefix_name}-dspm-subnet-group"
   subnet_ids = aws_subnet.subnet_db[*].id
 
   tags = {
-    Name = "${var.prefix_name}-ds3m-subnet-group"
+    Name = "${var.prefix_name}-dspm-subnet-group"
   }
 
   depends_on = [
@@ -607,7 +607,7 @@ resource "aws_db_subnet_group" "db_subnet_group" {
 }
 
 resource "aws_db_instance" "postgres" {
-  identifier             = "${var.prefix_name}-ds3m-db"
+  identifier             = "${var.prefix_name}-dspm-db"
   instance_class         = "db.t3.micro"
   allocated_storage      = 32
   engine                 = "postgres"
@@ -627,7 +627,7 @@ resource "aws_db_instance" "postgres" {
 }
 
 resource "aws_secretsmanager_secret" "ds_secret" {
-  name = "${var.prefix_name}-ds3m-ds-secret"
+  name = "${var.prefix_name}-dspm-ds-secret"
 
   depends_on = [
     aws_db_instance.postgres
@@ -709,7 +709,7 @@ INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec
 REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/region -H "X-aws-ec2-metadata-token: $TOKEN"`
 PUB_IP=`curl -s http://169.254.169.254/latest/meta-data/public-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
 
-wget -O /home/ec2-user/dsssm/certs/rds.crt "${var.url_rds_certificate}"
+wget -O /home/ec2-user/dspm/certs/rds.crt "${var.url_rds_certificate}"
 
 echo "{
    \"UrlToBuild\": \"\",
@@ -764,7 +764,7 @@ echo "{
      \"TRACE_NET_ACCESS_AWS\": false,
      \"COMMANDS\": false
    }
-}" > /home/ec2-user/dsssm/config/app.json
+}" > /home/ec2-user/dspm/config/app.json
 
 echo '{
   "development": {
@@ -778,29 +778,29 @@ echo '{
         "require": true,
         "rejectUnauthorized": true,
         "ca": [
-          "/home/ec2-user/dsssm/certs/rds.crt"
+          "/home/ec2-user/dspm/certs/rds.crt"
         ]
       }
     }
   }
-}' > /home/ec2-user/dsssm/config/config.json
+}' > /home/ec2-user/dspm/config/config.json
 
-echo '${var.http_server_key}' > /home/ec2-user/dsssm/certs/server.key
+echo '${var.http_server_key}' > /home/ec2-user/dspm/certs/server.key
 
-echo '${var.http_server_crt}' > /home/ec2-user/dsssm/certs/server.crt
+echo '${var.http_server_crt}' > /home/ec2-user/dspm/certs/server.crt
 
-echo '${var.encryption_private_key}' > /home/ec2-user/dsssm/src/helpers/encryption/private.pem
+echo '${var.encryption_private_key}' > /home/ec2-user/dspm/src/helpers/encryption/private.pem
 
-echo '${var.encryption_public_key}' > /home/ec2-user/dsssm/src/helpers/encryption/public.pem
+echo '${var.encryption_public_key}' > /home/ec2-user/dspm/src/helpers/encryption/public.pem
 
 yum install nodejs -y
 
 UV_USE_IO_URING=0
 export UV_USE_IO_URING=0
 
-cd /home/ec2-user/dsssm && npm install && npm run start-database-migration
+cd /home/ec2-user/dspm && npm install && npm run start-database-migration
 
-sudo chown -R root:root /home/ec2-user/dsssm
+sudo chown -R root:root /home/ec2-user/dspm
 
 echo '[Unit]
 Description=DSPM (Data Security Posture Management) Service
@@ -809,14 +809,14 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/ec2-user/dsssm
+WorkingDirectory=/home/ec2-user/dspm
 Environment="UV_USE_IO_URING=0"
 ExecStart=/usr/bin/npm run start-http-server
 ExecStop=/usr/bin/pkill -f "node.*start-http-server"
 Restart=on-failure
 RestartSec=10
-StandardOutput=append:/home/ec2-user/dsssm/logs/dsssm.txt
-StandardError=append:/home/ec2-user/dsssm/logs/dsssm.txt
+StandardOutput=append:/home/ec2-user/dspm/logs/dspm.txt
+StandardError=append:/home/ec2-user/dspm/logs/dspm.txt
 
 [Install]
 WantedBy=multi-user.target
@@ -833,7 +833,7 @@ sudo systemctl status dspm.service
 EOT
 }
 
-resource "aws_instance" "ds3m" {
+resource "aws_instance" "dspm" {
   ami                               = data.aws_ami.dspm.id
   instance_type                     = "t3.medium"
   iam_instance_profile              = var.iam_role_profile_name
@@ -848,7 +848,7 @@ resource "aws_instance" "ds3m" {
   }
 
   tags = {
-    Name = "${var.prefix_name}-Ds3mInstance"
+    Name = "${var.prefix_name}-DspmInstance"
   }
 
   depends_on = [
@@ -868,7 +868,7 @@ resource "aws_instance" "ds3m" {
     aws_security_group.ds,
     aws_db_subnet_group.db_subnet_group,
     aws_db_instance.postgres,
-    aws_instance.ds3m,
+    aws_instance.dspm,
     aws_iam_role.iam_role,
     aws_iam_instance_profile.iam_role_profile
   ]
@@ -945,7 +945,7 @@ then
   done
 
   echo "Configuration..."
-  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type "postgresql" --dictionary-host ${element(split(":", aws_db_instance.postgres.endpoint), 0)} --dictionary-port 5432 --dictionary-database "postgres" --dictionary-schema "public" --dictionary-login "postgres" ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dsssm-$INSTID-${var.prefix_name} --server-host "$DS_HOST_PRIVIP" --server-port 11000  --server-use-https 1 --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
+  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type "postgresql" --dictionary-host ${element(split(":", aws_db_instance.postgres.endpoint), 0)} --dictionary-port 5432 --dictionary-database "postgres" --dictionary-schema "public" --dictionary-login "postgres" ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dspm-$INSTID-${var.prefix_name} --server-host "$DS_HOST_PRIVIP" --server-port 11000  --server-use-https 1 --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
   PASS=`aws secretsmanager get-secret-value --secret-id ${aws_secretsmanager_secret.ds_secret.id} | jq --raw-output ".SecretString" | jq --raw-output ".password"` >> /opt/datasunrise/logs/start.log
   PASS="$${PASS//\'\''/\'\''\\\'\''\'\''}"
   /opt/datasunrise/scripts/configure-datasunrise.sh setup-password --password "$PASS" -f >> /opt/datasunrise/logs/start.log
@@ -1000,7 +1000,7 @@ resource "aws_instance" "ds_reference_instance" {
 }
 
 resource "aws_iam_role" "iam_role" {
-  name               = "${var.prefix_name}-Ds3mIamRole"
+  name               = "${var.prefix_name}-DspmIamRole"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -1113,7 +1113,7 @@ resource "aws_iam_role_policy" "datasunrise_instance_policy" {
 }
 
 resource "aws_iam_instance_profile" "iam_role_profile" {
-  name = "${var.prefix_name}-Ds3mIamRoleProfile"
+  name = "${var.prefix_name}-DspmIamRoleProfile"
   role = aws_iam_role.iam_role.name
 }
 
@@ -1121,14 +1121,14 @@ resource "null_resource" "update" {
   count = var.path_to_private_key_for_update_build != "" ? 1 : 0
   triggers = {
     always_run  = "${timestamp()}"
-    host        = aws_instance.ds3m.public_ip
+    host        = aws_instance.dspm.public_ip
     private_key = file(var.path_to_private_key_for_update_build)
   }
 
   provisioner "remote-exec" {
     inline = [
       "sudo systemctl stop rc-local",
-      "sudo rm dsssm/ -R"
+      "sudo rm dspm/ -R"
     ]
   }
 
@@ -1137,13 +1137,13 @@ resource "null_resource" "update" {
   }
 
   provisioner "file" {
-    source      = "../../../dsssm"
+    source      = "../../../dspm"
     destination = "/home/ec2-user"
   }
 
   provisioner "remote-exec" {
     inline = [
-      "sudo chown root:root dsssm/ -R"
+      "sudo chown root:root dspm/ -R"
     ]
   }
 
@@ -1155,12 +1155,12 @@ resource "null_resource" "update" {
   }
 
   depends_on = [
-    aws_instance.ds3m
+    aws_instance.dspm
   ]
 }
 
 output "web_console" {
-  value = "https://${aws_instance.ds3m.public_ip}:8080"
+  value = "https://${aws_instance.dspm.public_ip}:8080"
 }
 
 output "dspm_ami" {

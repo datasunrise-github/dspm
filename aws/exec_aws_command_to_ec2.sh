@@ -10,7 +10,7 @@ echo "instanceIDs: $instanceIDs";
 echo $instanceIDs | tr " " "\n" | while read instanceID; do
   echo "InstanceID: $instanceID";
   commandStatus="Pending";
-  commandID=`aws ssm send-command --document-name "AWS-RunShellScript" --region $aws_region --query "Command.CommandId" --output text --parameters "commands=[\"cd /home/ec2-user/dsssm && npm run uninstall\"]" --targets "Key=instanceids,Values=$instanceID" --comment "DELETION_RESOURCES_CREATED_BY_DSSSM"`;
+  commandID=`aws ssm send-command --document-name "AWS-RunShellScript" --region $aws_region --query "Command.CommandId" --output text --parameters "commands=[\"cd /home/ec2-user/dspm && npm run uninstall\"]" --targets "Key=instanceids,Values=$instanceID" --comment "DELETION_RESOURCES_CREATED_BY_DSPM"`;
   echo "commandID: $commandID";
   while [[ $commandStatus == "Pending" || $commandStatus == "InProgress" || $commandStatus == "None" ]]; do
     echo ".";

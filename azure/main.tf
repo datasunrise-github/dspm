@@ -234,13 +234,13 @@ resource "azurerm_public_ip" "public_ip" {
   ]
 }
 
-resource "azurerm_network_interface" "interface_dsssm" {
+resource "azurerm_network_interface" "interface_dspm" {
   name                = local.name
   resource_group_name = local.name
   location            = var.resource_group_location
 
   ip_configuration {
-    name                          = "interface_dsssm_configuration"
+    name                          = "interface_dspm_configuration"
     subnet_id                     = azurerm_subnet.default_subnet.id
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.public_ip.id
@@ -250,11 +250,11 @@ resource "azurerm_network_interface" "interface_dsssm" {
 }
 
 resource "azurerm_network_interface_security_group_association" "association_sg_to_interface" {
-  network_interface_id      = azurerm_network_interface.interface_dsssm.id
+  network_interface_id      = azurerm_network_interface.interface_dspm.id
   network_security_group_id = azurerm_network_security_group.network_security_group.id
   depends_on                = [
     azurerm_resource_group.resource_group,
-    azurerm_network_interface.interface_dsssm,
+    azurerm_network_interface.interface_dspm,
     azurerm_network_security_group.network_security_group
   ]
 }
@@ -468,7 +468,7 @@ echo "{
      \"TRACE_NET_ACCESS_AWS\": false,
      \"COMMANDS\": false
    }
-}" > /home/${var.username}/dsssm/config/app.json
+}" > /home/${var.username}/dspm/config/app.json
 
 echo '{
   "development": {
@@ -484,26 +484,26 @@ echo '{
       }
     }
   }
-}' > /home/${var.username}/dsssm/config/config.json
+}' > /home/${var.username}/dspm/config/config.json
 az login --identity --username "${azurerm_user_assigned_identity.identity.client_id}"
 
 VAULT_NAME="${azurerm_key_vault.vault.name}"
 
-mkdir -p /home/${var.username}/dsssm/src/helpers/encryption/
-mkdir -p /home/${var.username}/dsssm/certs/
+mkdir -p /home/${var.username}/dspm/src/helpers/encryption/
+mkdir -p /home/${var.username}/dspm/certs/
 
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_private.name}" --query value -o tsv > /home/${var.username}/dsssm/src/helpers/encryption/private.pem
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_public.name}" --query value -o tsv > /home/${var.username}/dsssm/src/helpers/encryption/public.pem
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_private.name}" --query value -o tsv > /home/${var.username}/dspm/src/helpers/encryption/private.pem
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_public.name}" --query value -o tsv > /home/${var.username}/dspm/src/helpers/encryption/public.pem
 
 echo "Loading HTTPS certificates from Key Vault..."
 
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_key.name}" --query value -o tsv > /home/${var.username}/dsssm/certs/server.key
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_cert.name}" --query value -o tsv > /home/${var.username}/dsssm/certs/server.crt
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_key.name}" --query value -o tsv > /home/${var.username}/dspm/certs/server.key
+az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_cert.name}" --query value -o tsv > /home/${var.username}/dspm/certs/server.crt
 
-chown -R ${var.username}:${var.username} /home/${var.username}/dsssm/src/helpers/encryption/
-chown -R ${var.username}:${var.username} /home/${var.username}/dsssm/certs/
+chown -R ${var.username}:${var.username} /home/${var.username}/dspm/src/helpers/encryption/
+chown -R ${var.username}:${var.username} /home/${var.username}/dspm/certs/
 
-cd /home/${var.username}/dsssm && npm install && npm run start-database-migration
+cd /home/${var.username}/dspm && npm install && npm run start-database-migration
 
 echo '[Unit]
 Description=DSPM (Data Security Posture Management) Service
@@ -512,7 +512,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/${var.username}/dsssm
+WorkingDirectory=/home/${var.username}/dspm
 Environment="UV_USE_IO_URING=0"
 ExecStart=npm run start-http-server
 ExecStop=/usr/bin/pkill -f "node.*start-http-server"
@@ -575,7 +575,7 @@ resource "azapi_resource" "vm" {
       }
       networkProfile = {
         networkInterfaces = [{
-          id = azurerm_network_interface.interface_dsssm.id
+          id = azurerm_network_interface.interface_dspm.id
         }]
       }
 
@@ -604,7 +604,7 @@ resource "azapi_resource" "vm" {
     azurerm_subnet.default_subnet,
     azurerm_subnet.default_pg,
     azurerm_public_ip.public_ip,
-    azurerm_network_interface.interface_dsssm,
+    azurerm_network_interface.interface_dspm,
     azurerm_network_interface_security_group_association.association_sg_to_interface,
     azurerm_private_dns_zone.private_dns_zone,
     azurerm_private_dns_zone_virtual_network_link.private_dns_zone_virtual_network_link,
@@ -664,12 +664,12 @@ then
   while [[ $ipaddr == "" ]]; do
     echo "." && sleep 5 && ipaddr=`curl -H Metadata:true "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/privateIpAddress?api-version=2017-04-02&format=text"`
   done
-  echo "server_name: dsssm-$${instanceId}-${local.name}"
+  echo "server_name: dspm-$${instanceId}-${local.name}"
   echo "ipaddr: $ipaddr"
   echo "Configuration..."
   PASS=`az keyvault secret show --name ${data.azurerm_key_vault_secret.ds.name} --vault-name ${azurerm_key_vault.vault.name} | jq --raw-output ".value" | jq --raw-output ".password"`
   PASS="$${PASS//\'\''/\'\''\\\'\''\'\''}"
-  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type postgresql --dictionary-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --dictionary-port 5432 --dictionary-database dictionary --dictionary-schema public --dictionary-login postgres ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dsssm-$${instanceId}-${local.name} --server-host $${ipaddr} --server-port 11000  --server-use-https 1  --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
+  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type postgresql --dictionary-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --dictionary-port 5432 --dictionary-database dictionary --dictionary-schema public --dictionary-login postgres ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dspm-$${instanceId}-${local.name} --server-host $${ipaddr} --server-port 11000  --server-use-https 1  --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
   sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-audit --audit-type postgresql --audit-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --audit-port 5432 --audit-database audit --audit-schema public --audit-login postgres ${join("", ["--audit-password ", "'\\''", var.postgres_password, "'\\''"])} --audit-use-ssl 1 -f >> /opt/datasunrise/logs/start.log
   sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-password --password "$PASS" -f >> /opt/datasunrise/logs/start.log
   sudo systemctl start datasunrise.service

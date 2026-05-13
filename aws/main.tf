@@ -943,7 +943,6 @@ then
     INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
     DS_HOST_PRIVIP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
   done
-
   echo "Configuration..."
   sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type "postgresql" --dictionary-host ${element(split(":", aws_db_instance.postgres.endpoint), 0)} --dictionary-port 5432 --dictionary-database "postgres" --dictionary-schema "public" --dictionary-login "postgres" ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dspm-$INSTID-${var.prefix_name} --server-host "$DS_HOST_PRIVIP" --server-port 11000  --server-use-https 1 --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
   PASS=`aws secretsmanager get-secret-value --secret-id ${aws_secretsmanager_secret.ds_secret.id} | jq --raw-output ".SecretString" | jq --raw-output ".password"` >> /opt/datasunrise/logs/start.log

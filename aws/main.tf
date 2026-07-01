@@ -709,6 +709,16 @@ INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec
 REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/region -H "X-aws-ec2-metadata-token: $TOKEN"`
 PUB_IP=`curl -s http://169.254.169.254/latest/meta-data/public-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
 
+if ! getent group dspm >/dev/null; then
+  groupadd --system dspm
+fi
+if ! id -u dspm >/dev/null 2>&1; then
+  useradd --system --gid dspm --home-dir /home/ec2-user/dspm --no-create-home --shell /sbin/nologin dspm
+fi
+chgrp dspm /home/ec2-user
+chmod 750 /home/ec2-user
+
+wget -O /home/ec2-user/dspm/certs/global-bundle.pem "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
 wget -O /home/ec2-user/dspm/certs/rds.crt "${var.url_rds_certificate}"
 
 echo "{
@@ -749,10 +759,21 @@ echo "{
    ],
    \"FullEncryptionProtocol\": false,
    \"OnlyOneRegion\": false,
+   \"EnableDriverArchivesInstallation\": ${var.enable_driver_archives_installation},
    \"MaxThreadUpdateMetadata\": 25,
    \"SessionTimeout\": 100,
    \"IgnoreMaskTypeCheck\": true,
    \"Region\": \"$REGION\",
+   \"CloudSecurityScanner\": {
+     \"Enabled\": true,
+     \"BaseUrl\": \"http://127.0.0.1:10072\",
+     \"JarPath\": \"/home/ec2-user/dspm/dspm.jar\",
+     \"JavaPath\": \"java\",
+     \"ReportPath\": \"/home/ec2-user/dspm/dspm-reports\",
+     \"StartupTimeoutMs\": 60000,
+     \"StartupPollIntervalMs\": 1000,
+     \"RequestTimeoutMs\": 30000
+   },
    \"Logs\": {
      \"RPC\": true,
      \"UPDATE_METADATA\": true,
@@ -765,6 +786,7 @@ echo "{
      \"COMMANDS\": false
    }
 }" > /home/ec2-user/dspm/config/app.json
+chmod 600 /home/ec2-user/dspm/config/app.json
 
 echo '{
   "development": {
@@ -784,23 +806,37 @@ echo '{
     }
   }
 }' > /home/ec2-user/dspm/config/config.json
+chmod 600 /home/ec2-user/dspm/config/config.json
 
 echo '${var.http_server_key}' > /home/ec2-user/dspm/certs/server.key
+chmod 600 /home/ec2-user/dspm/certs/server.key
 
 echo '${var.http_server_crt}' > /home/ec2-user/dspm/certs/server.crt
+chmod 640 /home/ec2-user/dspm/certs/server.crt
 
 echo '${var.encryption_private_key}' > /home/ec2-user/dspm/src/helpers/encryption/private.pem
+chmod 600 /home/ec2-user/dspm/src/helpers/encryption/private.pem
 
 echo '${var.encryption_public_key}' > /home/ec2-user/dspm/src/helpers/encryption/public.pem
+chmod 640 /home/ec2-user/dspm/src/helpers/encryption/public.pem
 
 yum install nodejs -y
 
 UV_USE_IO_URING=0
 export UV_USE_IO_URING=0
+export NODE_EXTRA_CA_CERTS=/home/ec2-user/dspm/certs/global-bundle.pem
 
-cd /home/ec2-user/dspm && npm install && npm run start-database-migration
+chown -R dspm:dspm /home/ec2-user/dspm
+find /home/ec2-user/dspm -type d -exec chmod 750 {} +
+find /home/ec2-user/dspm -type f -exec chmod o-rwx {} +
+cat > /etc/sudoers.d/dspm-restart << 'SUDOEOF'
+dspm ALL=(root) NOPASSWD: /usr/bin/systemctl restart dspm, /usr/bin/systemctl restart dspm.service
+SUDOEOF
+chmod 0440 /etc/sudoers.d/dspm-restart
 
-sudo chown -R root:root /home/ec2-user/dspm
+cd /home/ec2-user/dspm
+runuser -u dspm -- env HOME=/home/ec2-user/dspm UV_USE_IO_URING="$UV_USE_IO_URING" NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS" npm install
+runuser -u dspm -- env HOME=/home/ec2-user/dspm UV_USE_IO_URING="$UV_USE_IO_URING" NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS" npm run start-database-migration
 
 echo '[Unit]
 Description=DSPM (Data Security Posture Management) Service
@@ -808,9 +844,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=dspm
+Group=dspm
 WorkingDirectory=/home/ec2-user/dspm
+Environment="HOME=/home/ec2-user/dspm"
 Environment="UV_USE_IO_URING=0"
+Environment="NODE_EXTRA_CA_CERTS=/home/ec2-user/dspm/certs/global-bundle.pem"
 ExecStart=/usr/bin/npm run start-http-server
 ExecStop=/usr/bin/pkill -f "node.*start-http-server"
 Restart=on-failure

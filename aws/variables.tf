@@ -100,6 +100,12 @@ variable "url_rds_certificate" {
   default     = "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
 }
 
+variable "enable_driver_archives_installation" {
+  type        = bool
+  description = "When true, DSPM installs uploaded custom driver archives on newly created DS instances"
+  default     = false
+}
+
 variable "encryption_private_key" {
   type        = string
   default     = <<EOT

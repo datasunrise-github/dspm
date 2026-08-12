@@ -306,27 +306,6 @@ resource "tls_private_key" "encryption_key" {
   rsa_bits  = 4096
 }
 
-resource "tls_private_key" "https_key" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
-
-resource "tls_self_signed_cert" "https_cert" {
-  private_key_pem = tls_private_key.https_key.private_key_pem
-
-  subject {
-    common_name  = "localhost"
-    organization = "DataSunrise"
-  }
-
-  validity_period_hours = 8760 
-
-  allowed_uses = [
-    "key_encipherment",
-    "digital_signature",
-    "server_auth",
-  ]
-}
 resource "azurerm_key_vault_secret" "enc_private" {
   name         = "${local.name}-enc-private"
   value        = tls_private_key.encryption_key.private_key_pem
@@ -337,20 +316,6 @@ resource "azurerm_key_vault_secret" "enc_private" {
 resource "azurerm_key_vault_secret" "enc_public" {
   name         = "${local.name}-enc-public"
   value        = tls_private_key.encryption_key.public_key_pem
-  key_vault_id = azurerm_key_vault.vault.id
-  depends_on   = [azurerm_role_assignment.admin]
-}
-
-resource "azurerm_key_vault_secret" "https_key" {
-  name         = "${local.name}-https-key"
-  value        = tls_private_key.https_key.private_key_pem
-  key_vault_id = azurerm_key_vault.vault.id
-  depends_on   = [azurerm_role_assignment.admin]
-}
-
-resource "azurerm_key_vault_secret" "https_cert" {
-  name         = "${local.name}-https-cert"
-  value        = tls_self_signed_cert.https_cert.cert_pem
   key_vault_id = azurerm_key_vault.vault.id
   depends_on   = [azurerm_role_assignment.admin]
 }
@@ -452,7 +417,7 @@ echo "{
      \"${azurerm_network_security_group.network_security_group.id}\"
    ],
    \"FullEncryptionProtocol\": false,
-   \"OnlyOneRegion\": false,
+   \"OnlyOneRegion\": true,
    \"MaxThreadUpdateMetadata\": 25,
    \"SessionTimeout\": 100,
    \"IgnoreMaskTypeCheck\": true,
@@ -494,11 +459,6 @@ mkdir -p /home/${var.username}/dspm/certs/
 
 az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_private.name}" --query value -o tsv > /home/${var.username}/dspm/src/helpers/encryption/private.pem
 az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_public.name}" --query value -o tsv > /home/${var.username}/dspm/src/helpers/encryption/public.pem
-
-echo "Loading HTTPS certificates from Key Vault..."
-
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_key.name}" --query value -o tsv > /home/${var.username}/dspm/certs/server.key
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.https_cert.name}" --query value -o tsv > /home/${var.username}/dspm/certs/server.crt
 
 chown -R ${var.username}:${var.username} /home/${var.username}/dspm/src/helpers/encryption/
 chown -R ${var.username}:${var.username} /home/${var.username}/dspm/certs/

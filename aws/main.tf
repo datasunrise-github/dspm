@@ -9,6 +9,12 @@ locals {
     "release" = "DataSunrise-Data-Security-Posture-Management*"
   }
 }
+
+locals {
+  has_encryption_private_key = trimspace(var.encryption_private_key) != ""
+  has_encryption_public_key  = trimspace(var.encryption_public_key) != ""
+}
+
 data "aws_caller_identity" "current" {}
 
 data "aws_availability_zones" "available" {
@@ -718,8 +724,32 @@ fi
 chgrp dspm /home/ec2-user
 chmod 750 /home/ec2-user
 
-wget -O /home/ec2-user/dspm/certs/global-bundle.pem "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem"
-wget -O /home/ec2-user/dspm/certs/rds.crt "${var.url_rds_certificate}"
+if [ ! -r /home/ec2-user/dspm/certs/global-bundle.pem ]; then
+  echo "Missing bundled RDS CA bundle: /home/ec2-user/dspm/certs/global-bundle.pem" >&2
+  exit 1
+fi
+cp /home/ec2-user/dspm/certs/global-bundle.pem /home/ec2-user/dspm/certs/rds.crt
+%{ if var.rds_certificate_s3_arn != "" }
+case "${var.rds_certificate_s3_arn}" in
+  arn:*:s3:::*/*) ;;
+  *) echo "Invalid rds_certificate_s3_arn: ${var.rds_certificate_s3_arn}" >&2; exit 1 ;;
+esac
+CERT_PATH=$(printf '%s' "${var.rds_certificate_s3_arn}" | sed 's|^arn:[^:]*:s3:::||')
+CERT_BUCKET=$(printf '%s' "$CERT_PATH" | cut -d'/' -f1)
+CERT_KEY=$(printf '%s' "$CERT_PATH" | cut -d'/' -f2-)
+if [ -z "$CERT_BUCKET" ] || [ -z "$CERT_KEY" ] || [ "$CERT_BUCKET" = "$CERT_KEY" ]; then
+  echo "Invalid rds_certificate_s3_arn: ${var.rds_certificate_s3_arn}" >&2
+  exit 1
+fi
+aws s3 cp "s3://$CERT_BUCKET/$CERT_KEY" /tmp/custom-rds-ca.pem >/dev/null
+if ! grep -Eq '^-----BEGIN CERTIFICATE-----' /tmp/custom-rds-ca.pem; then
+  echo "Downloaded rds_certificate_s3_arn is not a PEM certificate bundle: ${var.rds_certificate_s3_arn}" >&2
+  exit 1
+fi
+printf '\n' >> /home/ec2-user/dspm/certs/rds.crt
+cat /tmp/custom-rds-ca.pem >> /home/ec2-user/dspm/certs/rds.crt
+rm -f /tmp/custom-rds-ca.pem
+%{ endif }
 
 echo "{
    \"UrlToBuild\": \"\",
@@ -758,7 +788,7 @@ echo "{
      \"${aws_security_group.ec2.id}\"
    ],
    \"FullEncryptionProtocol\": false,
-   \"OnlyOneRegion\": false,
+   \"OnlyOneRegion\": true,
    \"EnableDriverArchivesInstallation\": ${var.enable_driver_archives_installation},
    \"MaxThreadUpdateMetadata\": 25,
    \"SessionTimeout\": 100,
@@ -808,17 +838,17 @@ echo '{
 }' > /home/ec2-user/dspm/config/config.json
 chmod 600 /home/ec2-user/dspm/config/config.json
 
-echo '${var.http_server_key}' > /home/ec2-user/dspm/certs/server.key
-chmod 600 /home/ec2-user/dspm/certs/server.key
-
-echo '${var.http_server_crt}' > /home/ec2-user/dspm/certs/server.crt
-chmod 640 /home/ec2-user/dspm/certs/server.crt
-
-echo '${var.encryption_private_key}' > /home/ec2-user/dspm/src/helpers/encryption/private.pem
+%{ if local.has_encryption_private_key && local.has_encryption_public_key }
+cat > /home/ec2-user/dspm/src/helpers/encryption/private.pem <<'DSPM_ENCRYPTION_PRIVATE_KEY'
+${var.encryption_private_key}
+DSPM_ENCRYPTION_PRIVATE_KEY
 chmod 600 /home/ec2-user/dspm/src/helpers/encryption/private.pem
 
-echo '${var.encryption_public_key}' > /home/ec2-user/dspm/src/helpers/encryption/public.pem
+cat > /home/ec2-user/dspm/src/helpers/encryption/public.pem <<'DSPM_ENCRYPTION_PUBLIC_KEY'
+${var.encryption_public_key}
+DSPM_ENCRYPTION_PUBLIC_KEY
 chmod 640 /home/ec2-user/dspm/src/helpers/encryption/public.pem
+%{ endif }
 
 yum install nodejs -y
 
@@ -888,6 +918,13 @@ resource "aws_instance" "dspm" {
 
   tags = {
     Name = "${var.prefix_name}-DspmInstance"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.has_encryption_private_key == local.has_encryption_public_key
+      error_message = "encryption_private_key and encryption_public_key must be both set or both empty."
+    }
   }
 
   depends_on = [

@@ -36,6 +36,7 @@ data "aws_ami" "dspm" {
 data "aws_ami" "ds" {
   owners = ["042001279082"]
   most_recent = true
+  name_regex  = "^Datasunrise-AMZN-LINUX2023-[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"
   filter {
     name   = "is-public"
     values = [true]

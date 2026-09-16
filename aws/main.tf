@@ -1,0 +1,1248 @@
+locals {
+  is_linux = length(regexall("/home/", lower(abspath(path.root)))) > 0
+}
+
+locals {
+  search_ami = {
+    "dev" = "MR-*-DataSunrise-Data-Security-Posture-Management-*",
+    "rc" = "RC-*-DataSunrise-Data-Security-Posture-Management-*",
+    "release" = "DataSunrise-Data-Security-Posture-Management*"
+  }
+}
+
+locals {
+  has_encryption_private_key = trimspace(var.encryption_private_key) != ""
+  has_encryption_public_key  = trimspace(var.encryption_public_key) != ""
+}
+
+data "aws_caller_identity" "current" {}
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+data "aws_ami" "dspm" {
+  most_recent = true
+  owners      = ["042001279082"]
+
+  filter {
+    name   = var.ami_id == "" ? "name" : "image-id"
+    values = [
+      var.ami_id == "" ? local.search_ami[var.image_type] : var.ami_id
+    ]
+  }
+}
+
+data "aws_ami" "ds" {
+  owners = ["042001279082"]
+  most_recent = true
+  name_regex  = "^Datasunrise-AMZN-LINUX2023-[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"
+  filter {
+    name   = "is-public"
+    values = [true]
+  }
+  filter {
+    name   = "name"
+    values = ["Datasunrise-AMZN-LINUX2023*"]
+  }
+}
+
+locals {
+  # Generate bucket name if not provided
+  auto_bucket_name = var.s3_bucket_name != "" ? var.s3_bucket_name : "${lower(var.prefix_name)}-dspm-terraform-cache"
+  # Use specified region or current region
+  bucket_region = var.s3_bucket_region != "" ? var.s3_bucket_region : var.region
+}
+
+# Create S3 bucket if not provided
+resource "aws_s3_bucket" "terraform_cache_auto" {
+  count  = var.s3_bucket_name == "" ? 1 : 0
+  bucket = local.auto_bucket_name
+
+  tags = {
+    Name        = "${var.prefix_name}-DSPM-Terraform-Cache"
+    Environment = "DSPM"
+    ManagedBy   = "Terraform"
+    Purpose     = "Terraform state cache for DSPM resources"
+  }
+
+  depends_on = [
+    aws_db_instance.postgres
+  ]
+}
+
+resource "null_resource" "s3" {
+  count  = var.s3_bucket_name == "" ? 1 : 0
+  triggers = {
+    name            = local.auto_bucket_name
+  }
+  provisioner "local-exec" {
+    when        = destroy
+    on_failure  = fail
+    command     = "aws s3 rm s3://${self.triggers.name}/dspm/"
+  }
+
+  depends_on = [
+    aws_s3_bucket.terraform_cache_auto
+  ]
+}
+
+# Block all public access
+resource "aws_s3_bucket_public_access_block" "terraform_cache_auto_pab" {
+  count  = var.s3_bucket_name == "" ? 1 : 0
+  bucket = aws_s3_bucket.terraform_cache_auto[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+
+  depends_on = [
+    aws_s3_bucket.terraform_cache_auto
+  ]
+}
+
+# Use existing bucket if provided, otherwise use the auto-created one
+data "aws_s3_bucket" "terraform_cache" {
+  bucket = var.s3_bucket_name != "" ? var.s3_bucket_name : aws_s3_bucket.terraform_cache_auto[0].id
+  depends_on = [aws_s3_bucket.terraform_cache_auto]
+}
+
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support = true
+
+  tags = {
+    Name = "${var.prefix_name}-DspmVpc"
+  }
+}
+
+resource "aws_subnet" "subnet_ec2" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.0.0/24"
+  availability_zone = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.prefix_name}-DspmSubnetEc2"
+  }
+
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+resource "aws_subnet" "subnet_db" {
+  count = length(data.aws_availability_zones.available.names)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.${count.index + 1}.0/24"
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.prefix_name}-DspmSubnet-${data.aws_availability_zones.available.names[count.index]}"
+  }
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+resource "aws_internet_gateway" "ig" {
+  vpc_id = aws_vpc.main.id
+  tags = {
+    Name = "${var.prefix_name}-DspmNetGw"
+  }
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+resource "aws_eip" "nat_eip" {
+  domain     = "vpc"
+  depends_on = [
+    aws_vpc.main,
+    aws_internet_gateway.ig
+  ]
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.subnet_ec2.id
+
+  tags = {
+    Name = "${var.prefix_name}-DspmNat"
+  }
+
+  depends_on    = [
+    aws_eip.nat_eip,
+    aws_subnet.subnet_ec2,
+    aws_internet_gateway.ig
+  ]
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+  tags = {
+    Name = "${var.prefix_name}-DspmRt"
+  }
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+resource "aws_route" "public_internet_gateway" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.ig.id
+
+  depends_on = [
+    aws_vpc.main,
+    aws_internet_gateway.ig,
+    aws_route_table.public
+  ]
+}
+
+resource "aws_route_table_association" "ec2" {
+  subnet_id      = aws_subnet.subnet_ec2.id
+  route_table_id = aws_route_table.public.id
+
+  depends_on = [
+    aws_route_table.public,
+    aws_subnet.subnet_ec2,
+    aws_vpc.main
+  ]
+}
+
+resource "aws_security_group" "ec2" {
+  name        = "${var.prefix_name}-DspmEc2Sg"
+  description = "Allow8080and22"
+  vpc_id      = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.prefix_name}-DspmEc2Sg"
+  }
+
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+resource "aws_security_group" "db" {
+  name        = "${var.prefix_name}-DspmDbSg"
+  description = "Allow5432"
+  vpc_id      = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.prefix_name}-DspmDbSg"
+  }
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+resource "aws_security_group" "ds" {
+  name        = "${var.prefix_name}-DspmDsSg"
+  description = "Allow11000"
+  vpc_id      = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.prefix_name}-DspmDsSg"
+  }
+  depends_on = [
+    aws_vpc.main
+  ]
+}
+
+########################
+### DSPM
+########################
+
+## DSPM users
+resource "aws_vpc_security_group_ingress_rule" "request_from_user_to_dspm" {
+  security_group_id = aws_security_group.ec2.id
+  cidr_ipv4         = var.allow_cidr_to_backend_8080
+  from_port         = 8080
+  to_port           = 8080
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_from_dspm_to_user" {
+  security_group_id = aws_security_group.ec2.id
+  cidr_ipv4         = var.allow_cidr_to_backend_8080
+  from_port         = 32768
+  to_port           = 65535
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2
+  ]
+}
+
+## DSPM admin
+
+resource "aws_vpc_security_group_ingress_rule" "request_by_ssh_22" {
+  security_group_id = aws_security_group.ec2.id
+  cidr_ipv4         = var.allow_cidr_to_ssh_22
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_by_ssh" {
+  count             = var.allow_cidr_to_ssh_22 == var.allow_cidr_to_backend_8080 ? 0 : 1
+  security_group_id = aws_security_group.ec2.id
+  cidr_ipv4         = var.allow_cidr_to_ssh_22
+  from_port         = 32768
+  to_port           = 65535
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2
+  ]
+}
+
+## DSPM downloading tools, certs and metadata
+resource "aws_vpc_security_group_ingress_rule" "request_net" {
+  security_group_id = aws_security_group.ec2.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 32768
+  to_port           = 65535
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_net" {
+  security_group_id = aws_security_group.ec2.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 1
+  to_port           = 32768
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2
+  ]
+}
+
+## DSPM Reference DS
+
+resource "aws_vpc_security_group_egress_rule" "request_from_dspm_to_ds_11000" {
+  security_group_id             = aws_security_group.ec2.id
+  referenced_security_group_id  = aws_security_group.ds.id
+  from_port                     = 11000
+  to_port                       = 11000
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2,
+    aws_security_group.ds
+  ]
+}
+
+resource "aws_vpc_security_group_ingress_rule" "response_from_dspm_to_ds" {
+  security_group_id =             aws_security_group.ec2.id
+  referenced_security_group_id  = aws_security_group.ds.id
+  from_port                       = 32768
+  to_port                         = 65535
+  ip_protocol                     = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2,
+    aws_security_group.ds
+  ]
+}
+
+## DSPM database
+
+resource "aws_vpc_security_group_egress_rule" "request_from_dspm_to_database" {
+  security_group_id             = aws_security_group.ec2.id
+  referenced_security_group_id  = aws_security_group.db.id
+  from_port                     = 5432
+  to_port                       = 5432
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2,
+    aws_security_group.db
+  ]
+}
+
+resource "aws_vpc_security_group_ingress_rule" "response_from_database_to_dspm" {
+  security_group_id             = aws_security_group.ec2.id
+  referenced_security_group_id  = aws_security_group.db.id
+  from_port                     = 32768
+  to_port                       = 65535
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ec2,
+    aws_security_group.db
+  ]
+}
+
+## DSPM downloading tools, certs and metadata
+resource "aws_vpc_security_group_ingress_rule" "ds_request_net" {
+  security_group_id = aws_security_group.ds.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 32768
+  to_port           = 65535
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "ds_response_net" {
+  security_group_id = aws_security_group.ds.id
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 1
+  to_port           = 32768
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds
+  ]
+}
+
+########################
+# Database
+########################
+
+## Database DSPM
+resource "aws_vpc_security_group_ingress_rule" "request_from_dspm_to_database" {
+  security_group_id             = aws_security_group.db.id
+  referenced_security_group_id  = aws_security_group.ec2.id
+  from_port                     = 5432
+  to_port                       = 5432
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.db,
+    aws_security_group.ec2
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_from_database_to_dspm" {
+  security_group_id             = aws_security_group.db.id
+  referenced_security_group_id  = aws_security_group.ec2.id
+  from_port                     = 32768
+  to_port                       = 65535
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.db,
+    aws_security_group.ec2
+  ]
+}
+
+## Database reference DS
+resource "aws_vpc_security_group_ingress_rule" "request_from_ds_to_database" {
+  security_group_id             = aws_security_group.db.id
+  referenced_security_group_id  = aws_security_group.ds.id
+  from_port                     = 5432
+  to_port                       = 5432
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.db,
+    aws_security_group.ds
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_from_database_to_ds" {
+  security_group_id             = aws_security_group.db.id
+  referenced_security_group_id  = aws_security_group.ds.id
+  from_port                     = 32768
+  to_port                       = 65535
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.db,
+    aws_security_group.ds
+  ]
+}
+
+## Database admin
+resource "aws_vpc_security_group_ingress_rule" "request_from_admin_to_database" {
+  security_group_id             = aws_security_group.db.id
+  cidr_ipv4                     = var.allow_cidr_to_ssh_22
+  from_port                     = 5432
+  to_port                       = 5432
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.db
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_from_database_to_admin" {
+  security_group_id             = aws_security_group.db.id
+  cidr_ipv4                     = var.allow_cidr_to_ssh_22
+  from_port                     = 32768
+  to_port                       = 65535
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.db
+  ]
+}
+
+
+########################
+# Reference DataSunrise
+########################
+
+## DSPM
+resource "aws_vpc_security_group_ingress_rule" "request_from_dspm_to_ds" {
+  security_group_id             = aws_security_group.ds.id
+  referenced_security_group_id  = aws_security_group.ec2.id
+  from_port                     = 11000
+  to_port                       = 11000
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds,
+    aws_security_group.ec2
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_from_ds_to_dspm" {
+  security_group_id             = aws_security_group.ds.id
+  referenced_security_group_id  = aws_security_group.ec2.id
+  from_port                     = 32768
+  to_port                       = 65535
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds,
+    aws_security_group.ec2
+  ]
+}
+
+## Database
+resource "aws_vpc_security_group_egress_rule" "request_from_ds_to_database" {
+  security_group_id             = aws_security_group.ds.id
+  referenced_security_group_id  = aws_security_group.db.id
+  from_port                     = 5432
+  to_port                       = 5432
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds,
+    aws_security_group.db
+  ]
+}
+
+resource "aws_vpc_security_group_ingress_rule" "response_from_database_to_ds" {
+  security_group_id             = aws_security_group.ds.id
+  referenced_security_group_id  = aws_security_group.db.id
+  from_port                     = 32768
+  to_port                       = 65535
+  ip_protocol                   = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds,
+    aws_security_group.db
+  ]
+}
+
+## DS admin
+
+resource "aws_vpc_security_group_ingress_rule" "request_to_ds_by_ssh_22" {
+  security_group_id = aws_security_group.ds.id
+  cidr_ipv4         = var.allow_cidr_to_ssh_22
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds
+  ]
+}
+
+resource "aws_vpc_security_group_ingress_rule" "request_to_ds_by_admin_11000" {
+  security_group_id = aws_security_group.ds.id
+  cidr_ipv4         = var.allow_cidr_to_ssh_22
+  from_port         = 11000
+  to_port           = 11000
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds
+  ]
+}
+
+resource "aws_vpc_security_group_egress_rule" "response_from_ds_by_ssh" {
+  security_group_id = aws_security_group.ds.id
+  cidr_ipv4         = var.allow_cidr_to_ssh_22
+  from_port         = 32768
+  to_port           = 65535
+  ip_protocol       = "tcp"
+  depends_on = [
+    aws_vpc.main,
+    aws_security_group.ds
+  ]
+}
+
+############################################################
+
+
+resource "aws_db_subnet_group" "db_subnet_group" {
+  name       = "${var.prefix_name}-dspm-subnet-group"
+  subnet_ids = aws_subnet.subnet_db[*].id
+
+  tags = {
+    Name = "${var.prefix_name}-dspm-subnet-group"
+  }
+
+  depends_on = [
+    aws_vpc.main,
+    aws_subnet.subnet_db
+  ]
+}
+
+resource "aws_db_instance" "postgres" {
+  identifier             = "${var.prefix_name}-dspm-db"
+  instance_class         = "db.t3.micro"
+  allocated_storage      = 32
+  engine                 = "postgres"
+  engine_version         = "16"
+  username               = "postgres"
+  password               = var.postgres_password
+  db_subnet_group_name   = aws_db_subnet_group.db_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+
+  depends_on = [
+    aws_vpc.main,
+    aws_db_subnet_group.db_subnet_group,
+    aws_security_group.db
+  ]
+}
+
+resource "aws_secretsmanager_secret" "ds_secret" {
+  name = "${var.prefix_name}-dspm-ds-secret"
+
+  depends_on = [
+    aws_db_instance.postgres
+  ]
+}
+
+resource "aws_secretsmanager_secret_version" "ds_secret_version" {
+  secret_id     = aws_secretsmanager_secret.ds_secret.id
+  secret_string = "{\"username\": \"admin\", \"password\": \"${var.datasunrise_password}\"}"
+  depends_on = [
+    aws_secretsmanager_secret.ds_secret
+  ]
+}
+
+# IAM role for DSPM EC2 instance
+resource "aws_iam_role" "dspm_instance_role" {
+  name               = "${var.prefix_name}-DSPM-Instance-Role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.prefix_name}-DSPM-Instance-Role"
+  }
+}
+
+# IAM policy for accessing the DataSunrise secret
+resource "aws_iam_role_policy" "dspm_secret_access" {
+  name = "${var.prefix_name}-DSPM-Secret-Access"
+  role = aws_iam_role.dspm_instance_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = aws_secretsmanager_secret.ds_secret.arn
+      }
+    ]
+  })
+
+  depends_on = [
+    aws_iam_role.dspm_instance_role
+  ]
+}
+
+# Instance profile for DSPM EC2 instance
+resource "aws_iam_instance_profile" "dspm_instance_profile" {
+  name = "${var.prefix_name}-DSPM-Instance-Profile"
+  role = aws_iam_role.dspm_instance_role.name
+
+  tags = {
+    Name = "${var.prefix_name}-DSPM-Instance-Profile"
+  }
+
+  depends_on = [
+    aws_iam_role.dspm_instance_role
+  ]
+}
+
+locals {
+  userData = <<EOT
+#!/bin/bash
+TOKEN=`curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
+REGION=`curl -s http://169.254.169.254/latest/meta-data/placement/region -H "X-aws-ec2-metadata-token: $TOKEN"`
+PUB_IP=`curl -s http://169.254.169.254/latest/meta-data/public-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
+
+if ! getent group dspm >/dev/null; then
+  groupadd --system dspm
+fi
+if ! id -u dspm >/dev/null 2>&1; then
+  useradd --system --gid dspm --home-dir /home/ec2-user/dspm --no-create-home --shell /sbin/nologin dspm
+fi
+chgrp dspm /home/ec2-user
+chmod 750 /home/ec2-user
+
+if [ ! -r /home/ec2-user/dspm/certs/global-bundle.pem ]; then
+  echo "Missing bundled RDS CA bundle: /home/ec2-user/dspm/certs/global-bundle.pem" >&2
+  exit 1
+fi
+cp /home/ec2-user/dspm/certs/global-bundle.pem /home/ec2-user/dspm/certs/rds.crt
+%{ if var.rds_certificate_s3_arn != "" }
+case "${var.rds_certificate_s3_arn}" in
+  arn:*:s3:::*/*) ;;
+  *) echo "Invalid rds_certificate_s3_arn: ${var.rds_certificate_s3_arn}" >&2; exit 1 ;;
+esac
+CERT_PATH=$(printf '%s' "${var.rds_certificate_s3_arn}" | sed 's|^arn:[^:]*:s3:::||')
+CERT_BUCKET=$(printf '%s' "$CERT_PATH" | cut -d'/' -f1)
+CERT_KEY=$(printf '%s' "$CERT_PATH" | cut -d'/' -f2-)
+if [ -z "$CERT_BUCKET" ] || [ -z "$CERT_KEY" ] || [ "$CERT_BUCKET" = "$CERT_KEY" ]; then
+  echo "Invalid rds_certificate_s3_arn: ${var.rds_certificate_s3_arn}" >&2
+  exit 1
+fi
+aws s3 cp "s3://$CERT_BUCKET/$CERT_KEY" /tmp/custom-rds-ca.pem >/dev/null
+if ! grep -Eq '^-----BEGIN CERTIFICATE-----' /tmp/custom-rds-ca.pem; then
+  echo "Downloaded rds_certificate_s3_arn is not a PEM certificate bundle: ${var.rds_certificate_s3_arn}" >&2
+  exit 1
+fi
+printf '\n' >> /home/ec2-user/dspm/certs/rds.crt
+cat /tmp/custom-rds-ca.pem >> /home/ec2-user/dspm/certs/rds.crt
+rm -f /tmp/custom-rds-ca.pem
+%{ endif }
+
+echo "{
+   \"UrlToBuild\": \"\",
+   \"Email\": \"${var.email}\",
+   \"PublicIP\": \"$PUB_IP\",
+   \"Reference\": {
+      \"DsSecret\": \"${aws_secretsmanager_secret.ds_secret.arn}\",
+      \"Dictionary\": {
+        \"SSL\": true,
+        \"Host\": \"${element(split(":", aws_db_instance.postgres.endpoint), 0)}\",
+        \"Database\": \"postgres\",
+        \"Schema\": \"public\",
+        \"Username\": \"postgres\",
+        \"Password\": \"${var.postgres_password}\"
+      },
+      \"Audit\": {
+        \"SSL\": true,
+        \"Host\": \"${element(split(":", aws_db_instance.postgres.endpoint), 0)}\",
+        \"Database\": \"postgres\",
+        \"Schema\": \"public\",
+        \"Username\": \"postgres\",
+        \"Password\": \"${var.postgres_password}\"
+      }
+   },
+   \"AccountIDs\": [${length(var.allow_access_for_aws_account_ids) == 0 ? format("\\\"%s\\\"", data.aws_caller_identity.current.account_id) : join(",", formatlist("\\\"%s\\\"", var.allow_access_for_aws_account_ids))}],
+   \"TenantIDs\": [${join(",", formatlist("\\\"%s\\\"", var.allow_access_for_azure_account_ids))}],
+   \"TerraformCache\": {
+     \"BucketName\": \"${local.auto_bucket_name}\",
+     \"Region\": \"${data.aws_s3_bucket.terraform_cache.region}\"
+   },
+   \"AliasKeyNames\": {},
+   \"Subnets\": [
+     \"${aws_subnet.subnet_ec2.id}\"
+   ],
+   \"SecurityGroups\": [
+     \"${aws_security_group.ec2.id}\"
+   ],
+   \"FullEncryptionProtocol\": false,
+   \"OnlyOneRegion\": true,
+   \"EnableDriverArchivesInstallation\": ${var.enable_driver_archives_installation},
+   \"MaxThreadUpdateMetadata\": 25,
+   \"SessionTimeout\": 100,
+   \"IgnoreMaskTypeCheck\": true,
+   \"Region\": \"$REGION\",
+   \"CloudSecurityScanner\": {
+     \"Enabled\": true,
+     \"BaseUrl\": \"http://127.0.0.1:10072\",
+     \"JarPath\": \"/home/ec2-user/dspm/dspm.jar\",
+     \"JavaPath\": \"java\",
+     \"ReportPath\": \"/home/ec2-user/dspm/dspm-reports\",
+     \"StartupTimeoutMs\": 60000,
+     \"StartupPollIntervalMs\": 1000,
+     \"RequestTimeoutMs\": 30000
+   },
+   \"Logs\": {
+     \"RPC\": true,
+     \"UPDATE_METADATA\": true,
+     \"OTHER\": false,
+     \"ERROR\": true,
+     \"API_REQUEST\": false,
+     \"API_RESPONSE\": false,
+     \"ACCOUNTS\": true,
+     \"TRACE_NET_ACCESS_AWS\": false,
+     \"COMMANDS\": false
+   }
+}" > /home/ec2-user/dspm/config/app.json
+chmod 600 /home/ec2-user/dspm/config/app.json
+
+echo '{
+  "development": {
+    "username": "postgres",
+    "password": "${var.postgres_password}",
+    "database": "postgres",
+    "host": "${element(split(":", aws_db_instance.postgres.endpoint), 0)}",
+    "dialect": "postgres",
+    "dialectOptions": {
+      "ssl": {
+        "require": true,
+        "rejectUnauthorized": true,
+        "ca": [
+          "/home/ec2-user/dspm/certs/rds.crt"
+        ]
+      }
+    }
+  }
+}' > /home/ec2-user/dspm/config/config.json
+chmod 600 /home/ec2-user/dspm/config/config.json
+
+%{ if local.has_encryption_private_key && local.has_encryption_public_key }
+cat > /home/ec2-user/dspm/src/helpers/encryption/private.pem <<'DSPM_ENCRYPTION_PRIVATE_KEY'
+${var.encryption_private_key}
+DSPM_ENCRYPTION_PRIVATE_KEY
+chmod 600 /home/ec2-user/dspm/src/helpers/encryption/private.pem
+
+cat > /home/ec2-user/dspm/src/helpers/encryption/public.pem <<'DSPM_ENCRYPTION_PUBLIC_KEY'
+${var.encryption_public_key}
+DSPM_ENCRYPTION_PUBLIC_KEY
+chmod 640 /home/ec2-user/dspm/src/helpers/encryption/public.pem
+%{ endif }
+
+yum install nodejs -y
+
+UV_USE_IO_URING=0
+export UV_USE_IO_URING=0
+export NODE_EXTRA_CA_CERTS=/home/ec2-user/dspm/certs/global-bundle.pem
+
+chown -R dspm:dspm /home/ec2-user/dspm
+find /home/ec2-user/dspm -type d -exec chmod 750 {} +
+find /home/ec2-user/dspm -type f -exec chmod o-rwx {} +
+cat > /etc/sudoers.d/dspm-restart << 'SUDOEOF'
+dspm ALL=(root) NOPASSWD: /usr/bin/systemctl restart dspm, /usr/bin/systemctl restart dspm.service
+SUDOEOF
+chmod 0440 /etc/sudoers.d/dspm-restart
+
+cd /home/ec2-user/dspm
+runuser -u dspm -- env HOME=/home/ec2-user/dspm UV_USE_IO_URING="$UV_USE_IO_URING" NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS" npm install
+runuser -u dspm -- env HOME=/home/ec2-user/dspm UV_USE_IO_URING="$UV_USE_IO_URING" NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS" npm run start-database-migration
+
+echo '[Unit]
+Description=DSPM (Data Security Posture Management) Service
+After=network.target
+
+[Service]
+Type=simple
+User=dspm
+Group=dspm
+WorkingDirectory=/home/ec2-user/dspm
+Environment="HOME=/home/ec2-user/dspm"
+Environment="UV_USE_IO_URING=0"
+Environment="NODE_EXTRA_CA_CERTS=/home/ec2-user/dspm/certs/global-bundle.pem"
+ExecStart=/usr/bin/npm run start-http-server
+ExecStop=/usr/bin/pkill -f "node.*start-http-server"
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/ec2-user/dspm/logs/dspm.txt
+StandardError=append:/home/ec2-user/dspm/logs/dspm.txt
+
+[Install]
+WantedBy=multi-user.target
+' > /etc/systemd/system/dspm.service
+
+sudo systemctl daemon-reload
+
+sudo systemctl enable dspm.service
+
+sudo systemctl start dspm.service
+
+sudo systemctl status dspm.service
+
+EOT
+}
+
+resource "aws_instance" "dspm" {
+  ami                               = data.aws_ami.dspm.id
+  instance_type                     = "t3.medium"
+  iam_instance_profile              = var.iam_role_profile_name
+  subnet_id                         = aws_subnet.subnet_ec2.id
+  key_name                          = var.key_name
+  vpc_security_group_ids            = [aws_security_group.ec2.id]
+  user_data_base64 = base64encode(local.userData)
+
+  ebs_block_device {
+    device_name = "/dev/sda1"
+    volume_size = 32
+  }
+
+  tags = {
+    Name = "${var.prefix_name}-DspmInstance"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.has_encryption_private_key == local.has_encryption_public_key
+      error_message = "encryption_private_key and encryption_public_key must be both set or both empty."
+    }
+  }
+
+  depends_on = [
+    aws_db_instance.postgres,
+    aws_s3_bucket.terraform_cache_auto,
+    aws_vpc.main,
+    aws_subnet.subnet_db,
+    aws_subnet.subnet_ec2,
+    aws_internet_gateway.ig,
+    aws_eip.nat_eip,
+    aws_nat_gateway.nat,
+    aws_route_table.public,
+    aws_route.public_internet_gateway,
+    aws_route_table_association.ec2,
+    aws_security_group.ec2,
+    aws_security_group.db,
+    aws_security_group.ds,
+    aws_db_subnet_group.db_subnet_group,
+    aws_db_instance.postgres,
+    aws_instance.dspm,
+    aws_iam_role.iam_role,
+    aws_iam_instance_profile.iam_role_profile
+  ]
+}
+
+locals {
+  dsUserData = <<EOT
+#!/bin/bash
+
+echo "Installation..."
+yum install jq -y \
+  --setopt=timeout=10 \
+  --setopt=retries=2 \
+  --disablerepo='*' \
+  --enablerepo=amazonlinux
+yum install /opt/cooked/installer.rpm -y \
+  --setopt=timeout=10 \
+  --setopt=retries=2 \
+  --disablerepo='*'
+CUSTOM_CONFIG_DS=""
+if [[ $CUSTOM_CONFIG_DS != "" ]]
+then
+  echo "Usage custom file: $CUSTOM_CONFIG_DS"
+  rm /opt/datasunrise/scripts/configure-datasunrise.sh
+  aws s3 cp $CUSTOM_CONFIG_DS /opt/datasunrise/scripts/configure-datasunrise.sh
+  chmod +x /opt/datasunrise/scripts/configure-datasunrise.sh
+  chown datasunrise:datasunrise /opt/datasunrise/scripts/configure-datasunrise.sh
+fi
+
+echo '[Unit]
+ Description=/etc/rc.local Compatibility
+ ConditionPathExists=/etc/rc.local
+
+[Service]
+ Type=forking
+ ExecStart=/etc/rc.local start
+ ExecStop=/etc/rc.local stop
+ TimeoutSec=0
+ StandardOutput=tty
+ RemainAfterExit=yes
+ SysVStartPriority=99
+
+[Install]
+ WantedBy=multi-user.target
+' > /etc/systemd/system/rc-local.service
+
+echo '#!/bin/bash
+systemctl stop datasunrise.service
+
+if [[ $1 == "start" ]]
+then
+  export AF_HOME=/opt/datasunrise/
+
+  DICT_HOST="${element(split(":", aws_db_instance.postgres.endpoint), 0)}"
+  DICT_PORT=5432
+
+  while true; do
+    timeout 1 bash -c "echo > /dev/tcp/$DICT_HOST/$DICT_PORT" 2>/dev/null && break
+    echo "Waiting for $DICT_HOST:$DICT_PORT"
+    sleep 1
+  done
+  echo "$DICT_HOST:$DICT_PORT is now available"
+
+  TOKEN=`curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+  INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
+  DS_HOST_PRIVIP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
+
+  while [[ $DS_HOST_PRIVIP == "" ]]; do
+    echo "." >> /opt/datasunrise/logs/start.log
+    sleep 5
+    TOKEN=`curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"`
+    INSTID=`curl -s http://169.254.169.254/latest/meta-data/instance-id -H "X-aws-ec2-metadata-token: $TOKEN"`
+    DS_HOST_PRIVIP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4 -H "X-aws-ec2-metadata-token: $TOKEN"`
+  done
+  echo "Configuration..."
+  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type "postgresql" --dictionary-host ${element(split(":", aws_db_instance.postgres.endpoint), 0)} --dictionary-port 5432 --dictionary-database "postgres" --dictionary-schema "public" --dictionary-login "postgres" ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dspm-$INSTID-${var.prefix_name} --server-host "$DS_HOST_PRIVIP" --server-port 11000  --server-use-https 1 --copy-proxies 1  -f -v >> /opt/datasunrise/logs/start.log
+  PASS=`aws secretsmanager get-secret-value --secret-id ${aws_secretsmanager_secret.ds_secret.id} | jq --raw-output ".SecretString" | jq --raw-output ".password"` >> /opt/datasunrise/logs/start.log
+  PASS="$${PASS//\'\''/\'\''\\\'\''\'\''}"
+  /opt/datasunrise/scripts/configure-datasunrise.sh setup-password --password "$PASS" -f >> /opt/datasunrise/logs/start.log
+  systemctl start datasunrise.service
+fi
+
+if [[ $1 == "stop" ]]
+then
+  /opt/datasunrise/AppBackendService AF_HOME=/opt/datasunrise AF_CONFIG=/opt/datasunrise/ UNREGISTER_FIREWALL_SERVER
+fi
+
+exit 0
+' > /etc/rc.local
+
+chmod +x /etc/rc.local
+
+systemctl stop datasunrise.service
+
+systemctl enable rc-local
+
+systemctl start rc-local.service
+
+systemctl status rc-local.service
+
+EOT
+}
+
+resource "aws_instance" "ds_reference_instance" {
+  count = 1
+  ami                               = data.aws_ami.ds.id
+  instance_type                     = "t3.medium"
+  iam_instance_profile              = aws_iam_instance_profile.dspm_instance_profile.name
+  subnet_id                         = aws_subnet.subnet_ec2.id
+  key_name                          = var.key_name
+  vpc_security_group_ids            = [aws_security_group.ds.id]
+  user_data_base64                  = base64encode(local.dsUserData)
+  tags = {
+    Name                            = "${var.prefix_name}-reference-ds"
+  }
+  root_block_device {
+    volume_size           = 64
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
+
+  depends_on = [
+    aws_vpc.main,
+    aws_subnet.subnet_ec2,
+    aws_security_group.ds,
+    aws_iam_instance_profile.dspm_instance_profile
+  ]
+}
+
+resource "aws_iam_role" "iam_role" {
+  name               = "${var.prefix_name}-DspmIamRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Principal": {
+          "Service": [
+            "rds.amazonaws.com",
+            "s3.amazonaws.com",
+            "ec2.amazonaws.com"
+          ]
+        },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+# Separate IAM role policies to replace deprecated inline_policy
+resource "aws_iam_role_policy" "access_to_put_logs" {
+  name = "${var.prefix_name}-access-to-put-logs-by-aws-service"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListMultipartUploadParts",
+          "s3:PutObject",
+          "s3:AbortMultipartUpload"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "access_to_read_logs" {
+  name = "${var.prefix_name}-access-to-read-logs-by-aws-service"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetBucketLocation",
+          "s3:GetBucketACL",
+          "s3:ListBucket"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "access_to_read_files" {
+  name = "${var.prefix_name}-access-to-read-files-by-aws-DS"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:ListAllMyBuckets",
+          "s3:GetObject",
+          "s3:HeadObject",
+          "s3:ListObjectsV2",
+          "s3:ListObjects"
+        ],
+        "Resource": "arn:aws:s3:::*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "datasunrise_instance_policy" {
+  name = "${var.prefix_name}-datasunrise-instance-policy"
+  role = aws_iam_role.iam_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "rds:DownloadCompleteDBLogFile",
+          "rds:DownloadDBLogFilePortion",
+          "rds:DescribeDBClusters",
+          "rds:DescribeDBInstances",
+          "rds:DescribeDBLogFiles"
+        ],
+        "Resource": "arn:aws:rds:*"
+      },
+      {
+        "Effect": "Allow",
+        "Action": [
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:GetSecretValue"
+        ],
+        "Resource": "arn:aws:secretsmanager:*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "iam_role_profile" {
+  name = "${var.prefix_name}-DspmIamRoleProfile"
+  role = aws_iam_role.iam_role.name
+}
+
+resource "null_resource" "update" {
+  count = var.path_to_private_key_for_update_build != "" ? 1 : 0
+  triggers = {
+    always_run  = "${timestamp()}"
+    host        = aws_instance.dspm.public_ip
+    private_key = file(var.path_to_private_key_for_update_build)
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo systemctl stop rc-local",
+      "sudo rm dspm/ -R"
+    ]
+  }
+
+  provisioner "local-exec" {
+    command = "cd ../../ && npm run deploy"
+  }
+
+  provisioner "file" {
+    source      = "../../../dspm"
+    destination = "/home/ec2-user"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "sudo chown root:root dspm/ -R"
+    ]
+  }
+
+  connection {
+    host        = self.triggers.host
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = self.triggers.private_key
+  }
+
+  depends_on = [
+    aws_instance.dspm
+  ]
+}
+
+output "web_console" {
+  value = "https://${aws_instance.dspm.public_ip}:8080"
+}
+
+output "dspm_ami" {
+  value = "${data.aws_ami.dspm.name} (${data.aws_ami.dspm.id})"
+}
+
+output "ds_ami" {
+  value = "${data.aws_ami.ds.name} (${data.aws_ami.ds.id})"
+}

@@ -1,0 +1,15 @@
+{
+  "email": "",
+  "region": "eu-central-1",
+  "access_key": "XXXXXXXXX",
+  "secret_key": "XXXXXXXXX",
+  "datasunrise_password": "XXXXXXXX",
+  "s3_bucket_name": "",
+  "iam_role_profile_name": "",
+  "prefix_name": "",
+  "postgres_password": "",
+  "allow_cidr_to_backend_8080": "0.0.0.0/0",
+  "allow_cidr_to_ssh_22": "0.0.0.0/0",
+  "vpc_cidr_block": "10.0.0.0/16",
+  "key_name": ""
+}

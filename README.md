@@ -9,7 +9,7 @@ dateCreated: 2025-10-29T14:33:51.464Z
 
 ## What is DataSunrise DSPM?
 
-**[DataSunrise Data Security Posture Management (DSPM)](https://www.datasunrise.com/knowledge-center/dspm-data-security-posture-management/)** is a platform for comprehensive **data protection in AWS**. It automatically discovers databases and storages, deploys DataSunrise instances, and applies security rules.
+**[DataSunrise Data Security Posture Management (DSPM)](https://www.datasunrise.com/knowledge-center/dspm-data-security-posture-management/)** is a platform for comprehensive **data protection in Azure**. It automatically discovers databases and storages, deploys DataSunrise instances, and applies security rules.
 
 DSPM creates DataSunrise instances that can operate in three modes:
 
@@ -27,7 +27,7 @@ DSPM creates DataSunrise instances that can operate in three modes:
 
 ### 1. Download and Preparation
 
-1. Download Terraform scripts for DSPM from GitHub: [Terraform files for DSPM](https://github.com/datasunrise-github/dspm/tree/main/aws).
+1. Download Terraform scripts for DSPM from GitHub: [Terraform files for DSPM](https://github.com/datasunrise-github/dspm/tree/main/azure).
 2. Navigate to the scripts directory:
 
    ```bash

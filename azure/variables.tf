@@ -1,23 +1,13 @@
 variable "email" {
   type        = string
+  default     = ""
   description = "Corporate email address of the DSPM administrator"
-}
-
-variable "datasunrise_password" {
-  type        = string
-  sensitive   = true
-  description = <<EOF
-  Create a new password for the reference DataSunrise server.
-  The reference DataSunrise server is needed to centrally configure target DataSunrise instances.
-  Must be at least 8 characters, contain upper and lowercase Latin letters, numbers, symbols:
-  !#$%&\()*+,-./:;<=>?@[]^_`"'{|}~"
-  EOF
 }
 
 variable "resource_group_location" {
   type        = string
   description = <<EOT
-The Azure region (location) where the new resource group and associated resources will be created.
+The Azure region where the DSPM resource group and its resources will be created.
 
 Requirements:
 - The value must be in lowercase with no spaces (i.e., in lower_snake_case format), e.g., "eastus", "westeurope", "northeurope".
@@ -41,12 +31,30 @@ EOT
 
 variable "resource_group_name" {
   type        = string
-  description = "The name of the new Azure resource group to be created."
+  description = "The name of the Azure resource group that Terraform will create."
+}
+
+variable "image_channel" {
+  type        = string
+  default     = "release"
+  description = "DSPM image channel. Supported values: release, dev."
+
+  validation {
+    condition     = contains(["release", "dev"], var.image_channel)
+    error_message = "image_channel must be either \"release\" or \"dev\"."
+  }
 }
 
 variable "image_id" {
-  type    = string
-  default = ""
+  type        = string
+  default     = ""
+  description = "Optional DSPM image version ID. When set, overrides image_channel."
+}
+
+variable "is_public" {
+  type        = bool
+  default     = false
+  description = "Whether public IP addresses are assigned to the DSPM and Reference DataSunrise VMs."
 }
 
 
@@ -61,27 +69,9 @@ variable "username" {
   default     = "azureuser"
 }
 
-variable "postgres_password" {
-  type        = string
-  sensitive   = true
-  description = "Create a new password for the database where DSPM configuration settings and data will be stored"
-}
-
 variable "postgres_zone" {
   type    = string
   default = "1"
-}
-
-variable "allow_cidr_to_backend_8080" {
-  type        = string
-  default     = "0.0.0.0/0"
-  description = "CIDR IP range from which the DSPM web interface will be accessible"
-}
-
-variable "allow_cidr_to_ssh_22" {
-  type        = string
-  default     = "0.0.0.0/0"
-  description = "CIDR IP range from which SSH access to the DSPM VM instance will be allowed"
 }
 
 variable "datasunrise_custom_url" {

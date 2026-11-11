@@ -2,20 +2,86 @@ resource "random_pet" "database" {
   separator = "-"
 }
 
+resource "random_id" "global_name" {
+  byte_length = 6
+}
+
+resource "random_password" "postgres" {
+  length           = 32
+  special          = true
+  min_lower        = 1
+  min_upper        = 1
+  min_numeric      = 1
+  min_special      = 1
+  override_special = "!#$%&()*+,-.:;<=>?[]^_{|}~"
+}
+
+resource "random_password" "datasunrise" {
+  length      = 16
+  special     = true
+  min_lower   = 1
+  min_upper   = 1
+  min_numeric = 1
+  min_special = 1
+}
+
 data "external" "validate_region" {
   program = ["bash", "./validate_region.sh", var.resource_group_location, var.postgres_zone]
 }
 
-data "external" "latest_community_image" {
-  program = ["bash", "./get_community_images.sh", var.resource_group_location]
+locals {
+  image_channels = {
+    release = {
+      type       = "marketplace"
+      publisher  = "datasunrise"
+      offer      = "datasunrise-dspm"
+      sku        = "datasunrise-dspm"
+      gallery    = ""
+      definition = ""
+    }
+    dev = {
+      type       = "community"
+      publisher  = ""
+      offer      = ""
+      sku        = ""
+      gallery    = "datasunrise-c6a43e8c-c5f9-4e77-aeb7-29f27c10a8d4"
+      definition = "DSPM-MR"
+    }
+  }
+
+  selected_image_channel = local.image_channels[var.image_channel]
+  use_marketplace_image  = var.image_id == "" && local.selected_image_channel.type == "marketplace"
+}
+
+data "external" "latest_image" {
+  count = var.image_id == "" && local.selected_image_channel.type == "community" ? 1 : 0
+
+  program = [
+    "bash",
+    "./get_community_images.sh",
+    var.resource_group_location,
+    local.selected_image_channel.gallery,
+    local.selected_image_channel.definition
+  ]
 }
 
 locals {
-  image_type = var.image_id == "" ? "release" : "dev"
-}
-
-locals {
-  image_id = local.image_type == "dev" ? var.image_id : data.external.latest_community_image.result.communityGalleryImageId
+  image_id = var.image_id != "" ? var.image_id : (
+    local.selected_image_channel.type == "community" ? lookup(
+      data.external.latest_image[0].result,
+      "imageId",
+      ""
+    ) : ""
+  )
+  image_lookup_error = var.image_id == "" && local.selected_image_channel.type == "community" ? lookup(
+    data.external.latest_image[0].result,
+    "error",
+    "DSPM image lookup returned an invalid response."
+  ) : null
+  image_is_community = startswith(
+    lower(local.image_id),
+    "/communitygalleries/"
+  )
 }
 
 locals {
@@ -26,14 +92,26 @@ locals {
 data "azurerm_client_config" "current" {}
 
 locals {
-  name = "${var.resource_group_name}-${random_pet.database.id}"
+  name                = "${var.resource_group_name}-${random_pet.database.id}"
+  resource_group_name = azurerm_resource_group.resource_group.name
+  location            = var.resource_group_location
+  global_resource_name = "dspm${substr(
+    replace(lower(var.resource_group_name), "/[^a-z0-9]/", ""),
+    0,
+    8
+  )}${random_id.global_name.hex}"
 }
 
 resource "azurerm_resource_group" "resource_group" {
-  name     = local.name
+  name     = var.resource_group_name
   location = var.resource_group_location
 
   lifecycle {
+    precondition {
+      condition     = local.image_lookup_error == null || local.image_lookup_error == ""
+      error_message = local.image_lookup_error == null ? "" : local.image_lookup_error
+    }
+
     precondition {
       condition     = local.region_validation_error == null
       error_message = local.region_validation_error == null ? "" : local.region_validation_error
@@ -43,9 +121,9 @@ resource "azurerm_resource_group" "resource_group" {
 
 
 resource "azurerm_storage_account" "storage" {
-  name                     = var.resource_group_name
+  name                     = local.global_resource_name
   resource_group_name      = azurerm_resource_group.resource_group.name
-  location                 = azurerm_resource_group.resource_group.location
+  location                 = local.location
   account_tier             = "Standard"
   account_replication_type = "LRS"
 
@@ -56,7 +134,7 @@ resource "azurerm_storage_account" "storage" {
 
 resource "azurerm_storage_container" "container" {
   name                  = "dspm"
-  storage_account_name    = azurerm_storage_account.storage.name
+  storage_account_id    = azurerm_storage_account.storage.id
   container_access_type = "private"
 
   depends_on = [
@@ -64,20 +142,10 @@ resource "azurerm_storage_container" "container" {
   ]
 }
 
-resource "azurerm_user_assigned_identity" "dspm" {
-  name                        = "${local.name}-dspm"
-  location                    = var.resource_group_location
-  resource_group_name         = local.name
-
-  depends_on = [
-    azurerm_resource_group.resource_group
-  ]
-}
-
 resource "azurerm_user_assigned_identity" "identity" {
-  name                        = local.name
-  location                    = var.resource_group_location
-  resource_group_name         = local.name
+  name                = "${local.name}-identity"
+  location            = local.location
+  resource_group_name = local.resource_group_name
 
   depends_on = [
     azurerm_resource_group.resource_group
@@ -85,9 +153,9 @@ resource "azurerm_user_assigned_identity" "identity" {
 }
 
 resource "azurerm_key_vault" "vault" {
-  name                        = var.resource_group_name
-  resource_group_name         = local.name
-  location                    = azurerm_resource_group.resource_group.location
+  name                        = local.global_resource_name
+  resource_group_name         = local.resource_group_name
+  location                    = local.location
   enabled_for_disk_encryption = true
   tenant_id                   = data.azurerm_client_config.current.tenant_id
   soft_delete_retention_days  = 7
@@ -95,58 +163,27 @@ resource "azurerm_key_vault" "vault" {
 
   sku_name = "standard"
 
-  enable_rbac_authorization    = true
+  rbac_authorization_enabled = true
 }
 
-resource "azurerm_role_assignment" "admin" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Administrator"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
-resource "azurerm_role_assignment" "reader" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Reader"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
-resource "azurerm_role_assignment" "user" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
-resource "azurerm_role_assignment" "admin_identity" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Administrator"
-  principal_id         = azurerm_user_assigned_identity.identity.principal_id
-}
-
-resource "azurerm_role_assignment" "reade_identityr" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Reader"
-  principal_id         = azurerm_user_assigned_identity.identity.principal_id
-}
-
-resource "azurerm_role_assignment" "user_identity" {
+resource "azurerm_role_assignment" "identity_key_vault_secrets_user" {
   scope                = azurerm_key_vault.vault.id
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azurerm_user_assigned_identity.identity.principal_id
 }
 
-resource "azurerm_role_assignment" "blob_contributor" {
+resource "azurerm_role_assignment" "identity_storage_blob_data_contributor" {
   scope                = azurerm_storage_account.storage.id
   role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_user_assigned_identity.dspm.principal_id
+  principal_id         = azurerm_user_assigned_identity.identity.principal_id
 }
-
 
 resource "azurerm_key_vault_secret" "ds_reference" {
   key_vault_id = azurerm_key_vault.vault.id
   name         = "${local.name}-ds"
-  value        = jsonencode({
-    username   = "admin"
-    password   = var.datasunrise_password
+  value = jsonencode({
+    username = "admin"
+    password = random_password.datasunrise.result
   })
 
   depends_on = [
@@ -154,17 +191,22 @@ resource "azurerm_key_vault_secret" "ds_reference" {
   ]
 }
 
-data "azurerm_key_vault_secret" "ds" {
-  name         = "${local.name}-ds"
+resource "azurerm_key_vault_secret" "postgres" {
   key_vault_id = azurerm_key_vault.vault.id
+  name         = "${local.name}-postgres"
+  value = jsonencode({
+    username = "postgres"
+    password = random_password.postgres.result
+  })
+
   depends_on = [
-    azurerm_key_vault_secret.ds_reference
+    azurerm_key_vault.vault
   ]
 }
 
 resource "azurerm_ssh_public_key" "ssh_key" {
   name                = local.name
-  resource_group_name = local.name
+  resource_group_name = local.resource_group_name
   location            = var.resource_group_location
   public_key          = file(var.pathPublicKey)
 
@@ -176,58 +218,37 @@ resource "azurerm_ssh_public_key" "ssh_key" {
 # Create Network Security Group and rule
 resource "azurerm_network_security_group" "network_security_group" {
   name                = local.name
-  resource_group_name = local.name
+  resource_group_name = local.resource_group_name
   location            = var.resource_group_location
-
-  security_rule {
-    name                       = "SSH"
-    priority                   = 1001
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "22"
-    source_address_prefix      = var.allow_cidr_to_ssh_22
-    destination_address_prefix = "*"
-  }
-  security_rule {
-    name                       = "Web"
-    priority                   = 1002
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = 8080
-    source_address_prefix      = var.allow_cidr_to_backend_8080
-    destination_address_prefix = "*"
-  }
 
   depends_on = [azurerm_resource_group.resource_group]
 }
 
 resource "azurerm_virtual_network" "virtual_network" {
-  name                  = local.name
-  address_space         = ["10.0.0.0/16"]
-  resource_group_name   = local.name
-  location              = var.resource_group_location
+  name                = local.name
+  address_space       = ["10.0.0.0/16"]
+  resource_group_name = local.resource_group_name
+  location            = var.resource_group_location
 
   depends_on = [azurerm_resource_group.resource_group]
 }
 
 resource "azurerm_subnet" "default_subnet" {
-  name                  = "${local.name}-default"
-  resource_group_name   = local.name
-  virtual_network_name  = azurerm_virtual_network.virtual_network.name
-  address_prefixes      = ["10.0.0.0/24"]
+  name                 = "${local.name}-default"
+  resource_group_name  = local.resource_group_name
+  virtual_network_name = azurerm_virtual_network.virtual_network.name
+  address_prefixes     = ["10.0.0.0/24"]
 
   depends_on = [azurerm_resource_group.resource_group]
 }
 
 resource "azurerm_public_ip" "public_ip" {
+  count               = var.is_public ? 1 : 0
   name                = local.name
-  resource_group_name = local.name
+  resource_group_name = local.resource_group_name
   location            = var.resource_group_location
   allocation_method   = "Static"
+  sku                 = "Standard"
 
   depends_on = [
     azurerm_resource_group.resource_group
@@ -236,14 +257,14 @@ resource "azurerm_public_ip" "public_ip" {
 
 resource "azurerm_network_interface" "interface_dspm" {
   name                = local.name
-  resource_group_name = local.name
+  resource_group_name = local.resource_group_name
   location            = var.resource_group_location
 
   ip_configuration {
     name                          = "interface_dspm_configuration"
     subnet_id                     = azurerm_subnet.default_subnet.id
     private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = azurerm_public_ip.public_ip.id
+    public_ip_address_id          = var.is_public ? azurerm_public_ip.public_ip[0].id : null
   }
 
   depends_on = [azurerm_resource_group.resource_group]
@@ -252,7 +273,7 @@ resource "azurerm_network_interface" "interface_dspm" {
 resource "azurerm_network_interface_security_group_association" "association_sg_to_interface" {
   network_interface_id      = azurerm_network_interface.interface_dspm.id
   network_security_group_id = azurerm_network_security_group.network_security_group.id
-  depends_on                = [
+  depends_on = [
     azurerm_resource_group.resource_group,
     azurerm_network_interface.interface_dspm,
     azurerm_network_security_group.network_security_group
@@ -262,13 +283,13 @@ resource "azurerm_network_interface_security_group_association" "association_sg_
 
 ### Database
 resource "azurerm_subnet" "default_pg" {
-  name                  = "${local.name}-pg"
-  resource_group_name   = local.name
-  virtual_network_name  = azurerm_virtual_network.virtual_network.name
-  address_prefixes      = ["10.0.1.0/24"]
-  service_endpoints     = [
-    "Microsoft.Storage"
-  ]
+  name                 = "${local.name}-pg"
+  resource_group_name  = local.resource_group_name
+  virtual_network_name = azurerm_virtual_network.virtual_network.name
+  address_prefixes     = ["10.0.1.0/24"]
+  service_endpoint {
+    service = "Microsoft.Storage"
+  }
   delegation {
     name = local.name
     service_delegation {
@@ -283,19 +304,18 @@ resource "azurerm_subnet" "default_pg" {
 }
 
 resource "azurerm_private_dns_zone" "private_dns_zone" {
-  name                = "${local.name}.${azurerm_resource_group.resource_group.location}.private.postgres.database.azure.com"
-  resource_group_name = local.name
+  name                = "${local.name}.${local.location}.private.postgres.database.azure.com"
+  resource_group_name = local.resource_group_name
   depends_on = [
     azurerm_resource_group.resource_group
   ]
 }
 
 resource "azurerm_private_dns_zone_virtual_network_link" "private_dns_zone_virtual_network_link" {
-  name                  = local.name
-  private_dns_zone_name = azurerm_private_dns_zone.private_dns_zone.name
-  virtual_network_id    = azurerm_virtual_network.virtual_network.id
-  resource_group_name   = azurerm_resource_group.resource_group.name
-  depends_on            = [
+  name                = local.name
+  private_dns_zone_id = azurerm_private_dns_zone.private_dns_zone.id
+  virtual_network_id  = azurerm_virtual_network.virtual_network.id
+  depends_on = [
     azurerm_subnet.default_pg,
     azurerm_private_dns_zone.private_dns_zone
   ]
@@ -310,23 +330,23 @@ resource "azurerm_key_vault_secret" "enc_private" {
   name         = "${local.name}-enc-private"
   value        = tls_private_key.encryption_key.private_key_pem
   key_vault_id = azurerm_key_vault.vault.id
-  depends_on   = [azurerm_role_assignment.admin] # Важно: Terraform должен иметь права на запись
+
 }
 
 resource "azurerm_key_vault_secret" "enc_public" {
   name         = "${local.name}-enc-public"
   value        = tls_private_key.encryption_key.public_key_pem
   key_vault_id = azurerm_key_vault.vault.id
-  depends_on   = [azurerm_role_assignment.admin]
+
 }
 
 resource "azurerm_postgresql_flexible_server" "postgres" {
-  name                          = local.name
-  resource_group_name           = local.name
-  location                      = var.resource_group_location
-  version                       = "16"
-  administrator_login           = "postgres"
-  administrator_password        = var.postgres_password
+  name                   = local.name
+  resource_group_name    = local.resource_group_name
+  location               = var.resource_group_location
+  version                = "16"
+  administrator_login    = "postgres"
+  administrator_password = random_password.postgres.result
   # zone                          = var.postgres_zone
   sku_name                      = "B_Standard_B2s"
   delegated_subnet_id           = azurerm_subnet.default_pg.id
@@ -346,11 +366,11 @@ resource "azurerm_postgresql_flexible_server" "postgres" {
 }
 
 resource "azurerm_postgresql_flexible_server_database" "dictionary" {
-  for_each            = toset(["dictionary", "audit"])
-  name                = "${each.key}"
-  charset             = "utf8"
-  collation           = "en_US.utf8"
-  server_id           = azurerm_postgresql_flexible_server.postgres.id
+  for_each  = toset(["dictionary", "audit"])
+  name      = each.key
+  charset   = "utf8"
+  collation = "en_US.utf8"
+  server_id = azurerm_postgresql_flexible_server.postgres.id
 
   depends_on = [
     azurerm_postgresql_flexible_server.postgres
@@ -358,17 +378,14 @@ resource "azurerm_postgresql_flexible_server_database" "dictionary" {
 }
 
 locals {
+  dspm_public_ip   = var.is_public ? azurerm_public_ip.public_ip[0].ip_address : ""
+  dspm_access_ip   = var.is_public ? local.dspm_public_ip : azurerm_network_interface.interface_dspm.private_ip_address
+  dspm_access_type = var.is_public ? "public" : "private"
+
   userData = <<EOT
 #!/bin/bash
 
-sudo yum install nodejs npm -y
-
-# wait public address
-public_ip=""
-while [[ $public_ip == "" ]]; do
-  echo "." && sleep 5 && public_ip=`curl -H Metadata:true "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2017-04-02&format=text"`
-  [[ $public_ip == "" ]] && echo "." && sleep 5 && public_ip=`curl -s -H Metadata:true --noproxy "*" "http://169.254.169.254/metadata/loadbalancer?api-version=2020-10-01&format=json" | jq --raw-output ".loadbalancer.publicIpAddresses[0].frontendIpAddress"`
-done
+public_ip="${local.dspm_public_ip}"
 
 # wait dictionary
 DICT_HOST="${azurerm_postgresql_flexible_server.postgres.fqdn}"
@@ -392,7 +409,7 @@ echo "{
         \"Database\": \"dictionary\",
         \"Schema\": \"public\",
         \"Username\": \"postgres\",
-        \"Password\": \"${var.postgres_password}\"
+        \"Secret\": \"${azurerm_key_vault.vault.id}/secrets/${azurerm_key_vault_secret.postgres.name}\"
       },
       \"Audit\": {
         \"SSL\": true,
@@ -400,7 +417,7 @@ echo "{
         \"Database\": \"audit\",
         \"Schema\": \"public\",
         \"Username\": \"postgres\",
-        \"Password\": \"${var.postgres_password}\"
+        \"Secret\": \"${azurerm_key_vault.vault.id}/secrets/${azurerm_key_vault_secret.postgres.name}\"
       }
    },
    \"AccountIDs\": [],
@@ -433,37 +450,80 @@ echo "{
      \"TRACE_NET_ACCESS_AWS\": false,
      \"COMMANDS\": false
    }
-}" > /home/${var.username}/dspm/config/app.json
-
-echo '{
-  "development": {
-    "username": "postgres",
-    "password": "${var.postgres_password}",
-    "database": "postgres",
-    "host": "${azurerm_postgresql_flexible_server.postgres.fqdn}",
-    "dialect": "postgres",
-    "dialectOptions": {
-      "ssl": {
-        "require": true,
-        "rejectUnauthorized": false
-      }
-    }
-  }
-}' > /home/${var.username}/dspm/config/config.json
-az login --identity --username "${azurerm_user_assigned_identity.identity.client_id}"
+}" > /opt/dspm/config/app.json
 
 VAULT_NAME="${azurerm_key_vault.vault.name}"
 
-mkdir -p /home/${var.username}/dspm/src/helpers/encryption/
-mkdir -p /home/${var.username}/dspm/certs/
+mkdir -p /opt/dspm/src/helpers/encryption/
+mkdir -p /opt/dspm/certs/
 
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_private.name}" --query value -o tsv > /home/${var.username}/dspm/src/helpers/encryption/private.pem
-az keyvault secret show --vault-name "$VAULT_NAME" --name "${azurerm_key_vault_secret.enc_public.name}" --query value -o tsv > /home/${var.username}/dspm/src/helpers/encryption/public.pem
+SECRETS_READY=false
+for attempt in $(seq 1 30); do
+  unset PRIVATE_KEY PUBLIC_KEY POSTGRES_SECRET POSTGRES_PASSWORD
 
-chown -R ${var.username}:${var.username} /home/${var.username}/dspm/src/helpers/encryption/
-chown -R ${var.username}:${var.username} /home/${var.username}/dspm/certs/
+  az login --identity \
+    --client-id "${azurerm_user_assigned_identity.identity.client_id}" \
+    --allow-no-subscriptions >/dev/null 2>&1 &&
+  PRIVATE_KEY=$(az keyvault secret show \
+    --vault-name "$VAULT_NAME" \
+    --name "${azurerm_key_vault_secret.enc_private.name}" \
+    --query value -o tsv 2>/dev/null) &&
+  PUBLIC_KEY=$(az keyvault secret show \
+    --vault-name "$VAULT_NAME" \
+    --name "${azurerm_key_vault_secret.enc_public.name}" \
+    --query value -o tsv 2>/dev/null) &&
+  POSTGRES_SECRET=$(az keyvault secret show \
+    --vault-name "$VAULT_NAME" \
+    --name "${azurerm_key_vault_secret.postgres.name}" \
+    --query value -o tsv 2>/dev/null) &&
+  POSTGRES_PASSWORD=$(printf '%s' "$POSTGRES_SECRET" | jq -er \
+    '.password | select(type == "string" and length > 0)' 2>/dev/null) &&
+  printf '%s\n' "$PRIVATE_KEY" | openssl pkey -check -noout >/dev/null 2>&1 &&
+  printf '%s\n' "$PUBLIC_KEY" | openssl pkey -pubin -noout >/dev/null 2>&1 &&
+  { SECRETS_READY=true; break; }
 
-cd /home/${var.username}/dspm && npm install && npm run start-database-migration
+  echo "Waiting for DSPM secrets, attempt $attempt/30"
+  sleep 10
+done
+
+if [ "$SECRETS_READY" != true ]; then
+  echo "Failed to load DSPM secrets from Key Vault" >&2
+  exit 1
+fi
+
+echo "{
+  \"development\": {
+    \"username\": \"postgres\",
+    \"password\": \"$POSTGRES_PASSWORD\",
+    \"database\": \"postgres\",
+    \"host\": \"${azurerm_postgresql_flexible_server.postgres.fqdn}\",
+    \"dialect\": \"postgres\",
+    \"dialectOptions\": {
+      \"ssl\": {
+        \"require\": true,
+        \"rejectUnauthorized\": false
+      }
+    }
+  }
+}" > /opt/dspm/config/config.json
+
+printf '%s\n' "$PRIVATE_KEY" > /opt/dspm/src/helpers/encryption/private.pem.tmp
+printf '%s\n' "$PUBLIC_KEY" > /opt/dspm/src/helpers/encryption/public.pem.tmp
+
+chmod 600 /opt/dspm/config/config.json
+chown dspm:dspm /opt/dspm/src/helpers/encryption/*.tmp
+chmod 600 /opt/dspm/src/helpers/encryption/private.pem.tmp
+chmod 640 /opt/dspm/src/helpers/encryption/public.pem.tmp
+mv -f /opt/dspm/src/helpers/encryption/private.pem.tmp /opt/dspm/src/helpers/encryption/private.pem
+mv -f /opt/dspm/src/helpers/encryption/public.pem.tmp /opt/dspm/src/helpers/encryption/public.pem
+chown -R dspm:dspm /opt/dspm/config/
+chown -R dspm:dspm /opt/dspm/src/helpers/encryption/
+chown -R dspm:dspm /opt/dspm/certs/
+
+unset PRIVATE_KEY PUBLIC_KEY POSTGRES_SECRET POSTGRES_PASSWORD
+
+cd /opt/dspm
+runuser -u dspm -- env HOME=/opt/dspm UV_USE_IO_URING=0 npm run start-database-migration
 
 echo '[Unit]
 Description=DSPM (Data Security Posture Management) Service
@@ -471,10 +531,13 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/home/${var.username}/dspm
+User=dspm
+Group=dspm
+WorkingDirectory=/opt/dspm
+Environment="HOME=/opt/dspm"
 Environment="UV_USE_IO_URING=0"
-ExecStart=npm run start-http-server
+Environment="AZURE_CLIENT_ID=${azurerm_user_assigned_identity.identity.client_id}"
+ExecStart=/usr/bin/npm run start-http-server
 ExecStop=/usr/bin/pkill -f "node.*start-http-server"
 Restart=on-failure
 RestartSec=10
@@ -501,20 +564,25 @@ EOT
 }
 
 resource "azapi_resource" "vm" {
-  count = 1
+  count     = 1
   type      = "Microsoft.Compute/virtualMachines@2022-08-01"
   name      = local.name
   parent_id = azurerm_resource_group.resource_group.id
-  location  = azurerm_resource_group.resource_group.location
+  location  = local.location
 
-  body = jsonencode({
+  body = {
     identity = {
       type = "UserAssigned"
       userAssignedIdentities = {
-        "${azurerm_user_assigned_identity.dspm.id}" = {}
         "${azurerm_user_assigned_identity.identity.id}" = {}
       }
     }
+
+    plan = local.use_marketplace_image ? {
+      name      = local.selected_image_channel.sku
+      product   = local.selected_image_channel.offer
+      publisher = local.selected_image_channel.publisher
+    } : null
 
     properties = {
       hardwareProfile = {
@@ -528,10 +596,18 @@ resource "azapi_resource" "vm" {
           }
           deleteOption = "Delete"
         }
-        imageReference = {
-          communityGalleryImageId = local.image_type != "dev" ? local.image_id : null
-          id = local.image_type == "dev" ? local.image_id : null
-        }
+        imageReference = local.use_marketplace_image ? {
+          publisher = local.selected_image_channel.publisher
+          offer     = local.selected_image_channel.offer
+          sku       = local.selected_image_channel.sku
+          version   = "latest"
+          } : (
+          local.image_is_community ? {
+            communityGalleryImageId = local.image_id
+            } : {
+            id = local.image_id
+          }
+        )
       }
       networkProfile = {
         networkInterfaces = [{
@@ -540,9 +616,9 @@ resource "azapi_resource" "vm" {
       }
 
       osProfile = {
-        computerName = "hostname"
+        computerName  = "hostname"
         adminUsername = var.username
-        customData = base64encode(local.userData)
+        customData    = base64encode(local.userData)
         linuxConfiguration = {
           disablePasswordAuthentication = true
           ssh = {
@@ -554,7 +630,7 @@ resource "azapi_resource" "vm" {
         }
       }
     }
-  })
+  }
 
   depends_on = [
     azurerm_resource_group.resource_group,
@@ -568,6 +644,8 @@ resource "azapi_resource" "vm" {
     azurerm_network_interface_security_group_association.association_sg_to_interface,
     azurerm_private_dns_zone.private_dns_zone,
     azurerm_private_dns_zone_virtual_network_link.private_dns_zone_virtual_network_link,
+    azurerm_role_assignment.identity_key_vault_secrets_user,
+    azurerm_role_assignment.identity_storage_blob_data_contributor,
     azurerm_postgresql_flexible_server.postgres
   ]
 }
@@ -613,7 +691,6 @@ else
 fi
 
 sudo systemctl stop datasunrise.service
-az login --identity
 
 if [[ $1 == "start" ]]
 then
@@ -627,10 +704,24 @@ then
   echo "server_name: dspm-$${instanceId}-${local.name}"
   echo "ipaddr: $ipaddr"
   echo "Configuration..."
-  PASS=`az keyvault secret show --name ${data.azurerm_key_vault_secret.ds.name} --vault-name ${azurerm_key_vault.vault.name} | jq --raw-output ".value" | jq --raw-output ".password"`
+  LOG=/opt/datasunrise/logs/start.log
+  attempt=0
+  while true; do
+    attempt=$((attempt + 1))
+    az login --identity --client-id "${azurerm_user_assigned_identity.identity.client_id}" >/dev/null 2>>"$LOG"
+    DS_SECRET=`az keyvault secret show --name ${azurerm_key_vault_secret.ds_reference.name} --vault-name ${azurerm_key_vault.vault.name} --query value -o tsv 2>>"$LOG"`
+    POSTGRES_SECRET=`az keyvault secret show --name ${azurerm_key_vault_secret.postgres.name} --vault-name ${azurerm_key_vault.vault.name} --query value -o tsv 2>>"$LOG"`
+    PASS=`echo "$DS_SECRET" | jq --raw-output ".password" 2>>"$LOG"`
+    POSTGRES_PASSWORD=`echo "$POSTGRES_SECRET" | jq --raw-output ".password" 2>>"$LOG"`
+    [[ $PASS != "" && $POSTGRES_PASSWORD != "" ]] && break
+    echo "Waiting for Key Vault secrets, attempt $attempt" >> "$LOG"
+    sleep 10
+  done
+
+  echo "Reference DS secrets loaded from Key Vault" >> "$LOG"
   PASS="$${PASS//\'\''/\'\''\\\'\''\'\''}"
-  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type postgresql --dictionary-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --dictionary-port 5432 --dictionary-database dictionary --dictionary-schema public --dictionary-login postgres ${join("", ["--dictionary-password ", "'\\''", var.postgres_password, "'\\''"])} --dictionary-use-ssl 1 --server-name dspm-$${instanceId}-${local.name} --server-host $${ipaddr} --server-port 11000  --server-use-https 1  --copy-proxies 1  -f >> /opt/datasunrise/logs/start.log
-  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-audit --audit-type postgresql --audit-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --audit-port 5432 --audit-database audit --audit-schema public --audit-login postgres ${join("", ["--audit-password ", "'\\''", var.postgres_password, "'\\''"])} --audit-use-ssl 1 -f >> /opt/datasunrise/logs/start.log
+  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-configuration --dictionary-type postgresql --dictionary-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --dictionary-port 5432 --dictionary-database dictionary --dictionary-schema public --dictionary-login postgres --dictionary-password "$POSTGRES_PASSWORD" --dictionary-use-ssl 1 --server-name dspm-$${instanceId}-${local.name} --server-host $${ipaddr} --server-port 11000  --server-use-https 1  --copy-proxies 1  -f >> /opt/datasunrise/logs/start.log
+  sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-remote-audit --audit-type postgresql --audit-host ${azurerm_postgresql_flexible_server.postgres.fqdn} --audit-port 5432 --audit-database audit --audit-schema public --audit-login postgres --audit-password "$POSTGRES_PASSWORD" --audit-use-ssl 1 -f >> /opt/datasunrise/logs/start.log
   sudo runuser -u datasunrise -- /opt/datasunrise/scripts/configure-datasunrise.sh setup-password --password "$PASS" -f >> /opt/datasunrise/logs/start.log
   sudo systemctl start datasunrise.service
 fi
@@ -678,47 +769,14 @@ resource "azurerm_network_security_group" "network_security_group_reference" {
   location            = azurerm_virtual_network.virtual_network.location
 
   security_rule {
-    name                       = "SSH"
+    name                       = "DSPM-Backend-11000"
     priority                   = 1001
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    source_address_prefix      = var.allow_cidr_to_ssh_22
-    destination_port_range     = 22
-    destination_address_prefix = "*"
-  }
-  security_rule {
-    name                       = "Backend-11000"
-    priority                   = 1002
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    source_address_prefix      = var.allow_cidr_to_backend_8080
+    source_address_prefix      = azurerm_subnet.default_subnet.address_prefixes[0]
     destination_port_range     = 11000
-    destination_address_prefix = "*"
-  }
-  security_rule {
-    name                       = "Backend-11001"
-    priority                   = 1004
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    source_address_prefix      = var.allow_cidr_to_backend_8080
-    destination_port_range     = 11001
-    destination_address_prefix = "*"
-  }
-  security_rule {
-    name                       = "Backend-11002"
-    priority                   = 1005
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    source_address_prefix      = var.allow_cidr_to_backend_8080
-    destination_port_range     = 11002
     destination_address_prefix = "*"
   }
 }
@@ -728,19 +786,18 @@ resource "azurerm_network_interface_security_group_association" "association_sg_
   count                     = 1
   network_interface_id      = azurerm_network_interface.ds_network_interface[count.index].id
   network_security_group_id = azurerm_network_security_group.network_security_group_reference.id
-  depends_on                = [
+  depends_on = [
     azurerm_network_security_group.network_security_group_reference
   ]
 }
 
 resource "azurerm_public_ip" "public_ip_reference" {
-  # IS PUBLIC
-  count               = 1
+  count               = var.is_public ? 1 : 0
   name                = "${local.name}-reference-ds"
   resource_group_name = azurerm_virtual_network.virtual_network.resource_group_name
   location            = azurerm_virtual_network.virtual_network.location
-  allocation_method   = "Dynamic"
-  sku                 = "Basic"
+  allocation_method   = "Static"
+  sku                 = "Standard"
 }
 
 resource "azurerm_network_interface" "ds_network_interface" {
@@ -753,19 +810,19 @@ resource "azurerm_network_interface" "ds_network_interface" {
     name                          = "${local.name}-${count.index}-reference-ds"
     subnet_id                     = azurerm_subnet.default_subnet.id
     private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = azurerm_public_ip.public_ip_reference[0].id
+    public_ip_address_id          = var.is_public ? azurerm_public_ip.public_ip_reference[0].id : null
   }
 }
 
 resource "azurerm_linux_virtual_machine" "datasunrise_instance" {
-  count                 = 1
-  name                  = "${local.name}-reference-ds"
-  resource_group_name   = azurerm_virtual_network.virtual_network.resource_group_name
-  location              = azurerm_virtual_network.virtual_network.location
+  count               = 1
+  name                = "${local.name}-reference-ds"
+  resource_group_name = azurerm_virtual_network.virtual_network.resource_group_name
+  location            = azurerm_virtual_network.virtual_network.location
   network_interface_ids = [
     azurerm_network_interface.ds_network_interface[count.index].id
   ]
-  size                  = "Standard_B2s"
+  size = "Standard_B2s"
 
   os_disk {
     name                 = "${local.name}-reference-ds"
@@ -798,7 +855,7 @@ resource "azurerm_linux_virtual_machine" "datasunrise_instance" {
   }
 
   identity {
-    type         = "UserAssigned"
+    type = "UserAssigned"
     identity_ids = [
       azurerm_user_assigned_identity.identity.id
     ]
@@ -806,6 +863,8 @@ resource "azurerm_linux_virtual_machine" "datasunrise_instance" {
 
   depends_on = [
     azurerm_key_vault_secret.ds_reference,
+    azurerm_role_assignment.identity_key_vault_secrets_user,
+    azurerm_role_assignment.identity_storage_blob_data_contributor,
     azurerm_postgresql_flexible_server.postgres,
     azurerm_network_interface_security_group_association.association_sg_to_interface_reference,
     azurerm_network_interface.ds_network_interface,
@@ -816,88 +875,47 @@ resource "azurerm_linux_virtual_machine" "datasunrise_instance" {
   ]
 }
 
-// APP
-data "azurerm_subscription" "current" {
-}
-
-resource "azuread_application_registration" "app_registration" {
-  display_name = "app-${local.name}"
-}
-
-resource "azuread_service_principal" "dspm_sp" {
-  client_id = azuread_application_registration.app_registration.client_id
-}
-
-resource "azurerm_role_assignment" "admin_app" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Administrator"
-  principal_id         = azuread_service_principal.dspm_sp.object_id
-}
-
-resource "azurerm_role_assignment" "reade_app" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Reader"
-  principal_id         = azuread_service_principal.dspm_sp.object_id
-}
-
-resource "azurerm_role_assignment" "user_app" {
-  scope                = azurerm_key_vault.vault.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = azuread_service_principal.dspm_sp.object_id
-}
-
-resource "azurerm_role_assignment" "subscription_app" {
-  scope                = data.azurerm_subscription.current.id
-  role_definition_name = "Reader"
-  principal_id         = azuread_service_principal.dspm_sp.object_id
-}
-
-resource "azurerm_role_assignment" "contributor_app" {
-  scope                = azurerm_resource_group.resource_group.id
-  role_definition_name = "Contributor"
-  principal_id         = azuread_service_principal.dspm_sp.object_id
-}
-
-resource "azurerm_role_assignment" "owner_app" {
-  scope                = azurerm_resource_group.resource_group.id
-  role_definition_name = "Owner"
-  principal_id         = azuread_service_principal.dspm_sp.object_id
-}
-
-
-resource "azuread_application_password" "secret" {
-  display_name    = local.name
-  application_id  = azuread_application_registration.app_registration.id
-  depends_on = [
-    azuread_application_registration.app_registration
-  ]
-}
-
 locals {
-  link = azurerm_public_ip.public_ip.ip_address == "" ? "" : <<EOT
+  link = <<EOT
 
-You can now access the DSPM web console at:
+DSPM web console endpoint (${local.dspm_access_type} IP):
 ===============================================================================
-👉 https://${azurerm_public_ip.public_ip.ip_address}:8080
+https://${local.dspm_access_ip}:8080
 ===============================================================================
+An inbound NSG rule for TCP/8080 is required before this endpoint is reachable.
 
 EOT
 }
 
 output "result" {
   value = <<EOT
-🎉 Thank you for deploying and using DataSunrise DSPM! 🎉
+Thank you for deploying and using DataSunrise DSPM!
 ${local.link}
-Use the following parameters to log in to the DSPM UI:
-
-  🔹 Tenant ID:     ${nonsensitive(data.azurerm_client_config.current.tenant_id)}
-  🔹 Client ID:     ${nonsensitive(azuread_application_registration.app_registration.client_id)}
-  🔹 Client Secret: ${nonsensitive(azuread_application_password.secret.value)}
-
-⚠️ Please store this information securely.
+Azure App Registration is not created by this Terraform configuration.
+Use existing Azure credentials when connecting the Azure tenant in the DSPM UI.
 EOT
+}
+
+output "dspm_url" {
+  value = "https://${local.dspm_access_ip}:8080"
 }
 
 output "image_id" {
   value = local.image_id
+}
+
+output "managed_identity_id" {
+  value = azurerm_user_assigned_identity.identity.id
+}
+
+output "managed_identity_client_id" {
+  value = azurerm_user_assigned_identity.identity.client_id
+}
+
+output "key_vault_id" {
+  value = azurerm_key_vault.vault.id
+}
+
+output "storage_account_name" {
+  value = azurerm_storage_account.storage.name
 }

@@ -4,11 +4,19 @@ terraform {
   required_providers {
     azapi = {
       source  = "azure/azapi"
-      version = "~>1.5"
+      version = "= 2.13.0"
     }
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~>3.0"
+      version = "= 5.7.0"
+    }
+    external = {
+      source  = "hashicorp/external"
+      version = "~>2.3"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~>3.6"
     }
     tls = {
       source  = "hashicorp/tls"
@@ -19,4 +27,13 @@ terraform {
 
 provider "azurerm" {
   features {}
+  resource_provider_registrations = "none"
+  resource_providers_to_register = [
+    "Microsoft.Compute",
+    "Microsoft.DBforPostgreSQL",
+    "Microsoft.KeyVault",
+    "Microsoft.ManagedIdentity",
+    "Microsoft.Network",
+    "Microsoft.Storage",
+  ]
 }
